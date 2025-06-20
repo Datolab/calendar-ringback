@@ -1,0 +1,63 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Incoming Meeting</title>
+  <link rel="stylesheet" href="overlay.css">
+</head>
+<body>
+  <div class="call-container">
+    <div class="call-card">
+      <div class="call-header">
+        <h1>Incoming Meeting</h1>
+        <div class="call-timer">
+          <span id="timer">Connecting...</span>
+        </div>
+      </div>
+      
+      <div class="caller-info">
+        <div class="caller-avatar">
+          <div class="avatar-circle">
+            <span id="caller-initials">GC</span>
+          </div>
+        </div>
+        <h2 id="meeting-title">Loading meeting...</h2>
+        <p id="meeting-time">00:00 AM</p>
+      </div>
+      
+      <div class="participants-section">
+        <h3>Participants</h3>
+        <div id="participants-list" class="participants-list">
+          <!-- Participants will be inserted here dynamically -->
+        </div>
+      </div>
+      
+      <div class="call-actions">
+        <button id="answer-button" class="action-button answer">
+          <span class="button-icon">✓</span>
+          <span class="button-text">Answer</span>
+        </button>
+        
+        <div class="secondary-actions">
+          <button id="decline-button" class="action-button decline">
+            <span class="button-icon">✕</span>
+            <span class="button-text">Decline</span>
+          </button>
+          
+          <button id="snooze-button" class="action-button snooze">
+            <span class="button-icon">⏰</span>
+            <span class="button-text">Snooze (2min)</span>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
+  
+  <audio id="ringtone" loop>
+    <source src="../assets/ring-default.mp3" type="audio/mpeg">
+  </audio>
+  
+  <script src="overlay.js"></script>
+</body>
+</html>

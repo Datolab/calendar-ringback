@@ -1,0 +1,245 @@
+/* Google Calendar Callback Extension - Call Overlay Styles */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+  background-color: rgba(0, 0, 0, 0.95);
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  animation: fadeIn 0.3s ease-in-out;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; }
+  to { opacity: 1; }
+}
+
+@keyframes pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+
+.call-container {
+  width: 100%;
+  max-width: 400px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.call-card {
+  background-color: white;
+  width: 100%;
+  border-radius: 20px;
+  box-shadow: 0 10px 20px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  height: 600px;
+  animation: pulse 2s infinite;
+}
+
+.call-header {
+  background-color: #1a73e8;
+  color: white;
+  padding: 20px;
+  text-align: center;
+}
+
+.call-header h1 {
+  font-size: 20px;
+  font-weight: 500;
+  margin-bottom: 5px;
+}
+
+.call-timer {
+  font-size: 16px;
+  opacity: 0.8;
+}
+
+.caller-info {
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.caller-avatar {
+  margin-bottom: 16px;
+}
+
+.avatar-circle {
+  width: 96px;
+  height: 96px;
+  background-color: #4285f4;
+  border-radius: 50%;
+  color: white;
+  font-size: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 16px;
+}
+
+.caller-info h2 {
+  font-size: 24px;
+  font-weight: 500;
+  margin-bottom: 8px;
+  color: #202124;
+}
+
+.caller-info p {
+  font-size: 16px;
+  color: #5f6368;
+  margin-bottom: 16px;
+}
+
+.participants-section {
+  padding: 0 24px;
+  margin-bottom: 16px;
+  flex: 1;
+  overflow-y: auto;
+}
+
+.participants-section h3 {
+  font-size: 16px;
+  color: #5f6368;
+  margin-bottom: 12px;
+  font-weight: 500;
+}
+
+.participants-list {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.participant {
+  background-color: #f1f3f4;
+  padding: 6px 12px;
+  border-radius: 16px;
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+}
+
+.participant-initials {
+  width: 24px;
+  height: 24px;
+  background-color: #4285f4;
+  border-radius: 50%;
+  color: white;
+  font-size: 12px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-right: 6px;
+}
+
+.call-actions {
+  padding: 20px;
+}
+
+.action-button {
+  width: 100%;
+  padding: 12px;
+  border: none;
+  border-radius: 50px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 18px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: all 0.2s;
+  margin-bottom: 12px;
+}
+
+.button-icon {
+  margin-right: 8px;
+  font-size: 20px;
+}
+
+.answer {
+  background-color: #34a853;
+  color: white;
+}
+
+.answer:hover {
+  background-color: #2d9249;
+}
+
+.secondary-actions {
+  display: flex;
+  gap: 12px;
+}
+
+.decline, .snooze {
+  flex: 1;
+}
+
+.decline {
+  background-color: #ea4335;
+  color: white;
+}
+
+.decline:hover {
+  background-color: #d33426;
+}
+
+.snooze {
+  background-color: #f1f3f4;
+  color: #5f6368;
+}
+
+.snooze:hover {
+  background-color: #e8eaed;
+}
+
+@media (max-height: 700px) {
+  .call-card {
+    height: 500px;
+  }
+  
+  .caller-avatar {
+    margin-bottom: 8px;
+  }
+  
+  .avatar-circle {
+    width: 72px;
+    height: 72px;
+    font-size: 28px;
+    margin-bottom: 8px;
+  }
+  
+  .caller-info h2 {
+    font-size: 20px;
+    margin-bottom: 4px;
+  }
+  
+  .participants-section {
+    margin-bottom: 8px;
+  }
+}
+
+/* Animation for ringing effect */
+@keyframes ringing {
+  0% { transform: rotate(-5deg); }
+  50% { transform: rotate(5deg); }
+  100% { transform: rotate(-5deg); }
+}
+
+.ringing {
+  animation: ringing 0.2s infinite, pulse 2s infinite;
+}

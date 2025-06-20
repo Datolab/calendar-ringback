@@ -1,0 +1,39 @@
+{
+  "manifest_version": 3,
+  "name": "Google Calendar Callback",
+  "description": "Get an incoming call experience for your Google Calendar meetings with Meet links",
+  "version": "1.0.0",
+  "icons": {
+    "16": "assets/icons/icon16.png",
+    "48": "assets/icons/icon48.png",
+    "128": "assets/icons/icon128.png"
+  },
+  "action": {
+    "default_popup": "popup/popup.html",
+    "default_icon": {
+      "16": "assets/icons/icon16.png",
+      "48": "assets/icons/icon48.png",
+      "128": "assets/icons/icon128.png"
+    }
+  },
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "permissions": [
+    "identity",
+    "storage",
+    "alarms",
+    "notifications",
+    "tabs",
+    "windows"
+  ],
+  "host_permissions": [
+    "https://www.googleapis.com/*",
+    "https://meet.google.com/*"
+  ],
+  "oauth2": {
+    "client_id": "YOUR_CLIENT_ID_HERE",
+    "scopes": ["https://www.googleapis.com/auth/calendar.readonly"]
+  }
+}

@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Google Calendar Callback</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body>
+  <div class="container">
+    <header>
+      <h1>Google Calendar Callback</h1>
+    </header>
+    
+    <div id="auth-section" class="section">
+      <div id="not-signed-in" class="hidden">
+        <p>Sign in to connect with your Google Calendar.</p>
+        <button id="signin-button" class="primary-button">Sign In</button>
+      </div>
+      
+      <div id="signed-in" class="hidden">
+        <p>Signed in as: <span id="user-email">user@example.com</span></p>
+        <button id="signout-button" class="secondary-button">Sign Out</button>
+      </div>
+    </div>
+    
+    <div id="status-section" class="section hidden">
+      <div class="status-indicator">
+        <span id="status-icon" class="icon"></span>
+        <span id="status-text">Calendar monitoring active</span>
+      </div>
+      
+      <div id="upcoming-section">
+        <h2>Upcoming Meetings</h2>
+        <div id="upcoming-list">
+          <!-- Upcoming meetings will be inserted here dynamically -->
+          <p id="no-meetings" class="hidden">No upcoming meetings with Google Meet links.</p>
+        </div>
+      </div>
+    </div>
+    
+    <div id="settings-section" class="section">
+      <h2>Settings</h2>
+      
+      <div class="setting-item">
+        <label for="notification-timing">Call notification timing:</label>
+        <select id="notification-timing">
+          <option value="1">1 minute before</option>
+          <option value="3">3 minutes before</option>
+          <option value="5" selected>5 minutes before</option>
+          <option value="10">10 minutes before</option>
+        </select>
+      </div>
+      
+      <div class="setting-item">
+        <label for="auto-join">Auto-join on answer:</label>
+        <input type="checkbox" id="auto-join">
+      </div>
+      
+      <div class="setting-item">
+        <label for="ringtone">Ringtone:</label>
+        <select id="ringtone">
+          <option value="default" selected>Default</option>
+          <option value="classic">Classic Phone</option>
+          <option value="digital">Digital</option>
+        </select>
+        <button id="test-sound" class="small-button">Test</button>
+      </div>
+      
+      <button id="save-settings" class="primary-button">Save Settings</button>
+    </div>
+    
+    <div id="first-run-modal" class="modal hidden">
+      <div class="modal-content">
+        <h2>Welcome to Google Calendar Callback!</h2>
+        <p>This extension creates a phone-like experience for your Google Calendar meetings with Google Meet links.</p>
+        <p>To get started:</p>
+        <ol>
+          <li>Sign in with your Google account</li>
+          <li>Allow calendar access permissions</li>
+          <li>Keep this extension running in the background</li>
+        </ol>
+        <button id="first-run-continue" class="primary-button">Get Started</button>
+      </div>
+    </div>
+  </div>
+  
+  <footer>
+    <div id="status-footer">
+      <span id="version">v1.0.0</span>
+    </div>
+  </footer>
+  
+  <script src="popup.js"></script>
+</body>
+</html>

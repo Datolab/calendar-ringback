@@ -1,0 +1,34 @@
+{
+  "name": "google-calendar-callback",
+  "version": "1.0.0",
+  "description": "A Chrome extension that provides an incoming call experience for Google Calendar meetings with Meet links",
+  "private": true,
+  "scripts": {
+    "build": "echo \"No build step required for current version\" && exit 0",
+    "lint": "eslint . --ext .js",
+    "package": "zip -r google-calendar-callback.zip manifest.json background.js popup/ call-overlay/ assets/ LICENSE README.md",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/your-org/calendar-ringback.git"
+  },
+  "keywords": [
+    "chrome-extension",
+    "google-calendar",
+    "google-meet",
+    "calendar-notifications",
+    "meeting-reminder"
+  ],
+  "author": "Your Name",
+  "license": "See LICENSE file",
+  "bugs": {
+    "url": "https://github.com/your-org/calendar-ringback/issues"
+  },
+  "homepage": "https://github.com/your-org/calendar-ringback#readme",
+  "devDependencies": {
+    "eslint": "^8.45.0",
+    "eslint-config-prettier": "^9.0.0",
+    "prettier": "^3.0.0"
+  }
+}

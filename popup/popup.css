@@ -1,0 +1,196 @@
+/* Google Calendar Callback Extension - Popup Styles */
+
+* {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif;
+  width: 340px;
+  min-height: 480px;
+  background-color: #f9f9f9;
+  color: #333;
+  line-height: 1.5;
+}
+
+.container {
+  padding: 16px;
+}
+
+header {
+  text-align: center;
+  margin-bottom: 20px;
+  border-bottom: 1px solid #e0e0e0;
+  padding-bottom: 12px;
+}
+
+h1 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1a73e8;
+}
+
+h2 {
+  font-size: 15px;
+  margin-bottom: 12px;
+  color: #5f6368;
+}
+
+.section {
+  margin-bottom: 20px;
+  padding: 12px;
+  background-color: #fff;
+  border-radius: 8px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+}
+
+.hidden {
+  display: none;
+}
+
+.primary-button {
+  background-color: #1a73e8;
+  color: white;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  width: 100%;
+  font-weight: 500;
+  margin-top: 8px;
+}
+
+.primary-button:hover {
+  background-color: #1765cc;
+}
+
+.secondary-button {
+  background-color: #fff;
+  color: #1a73e8;
+  border: 1px solid #dadce0;
+  padding: 8px 16px;
+  border-radius: 4px;
+  font-size: 14px;
+  cursor: pointer;
+  width: 100%;
+  font-weight: 500;
+  margin-top: 8px;
+}
+
+.secondary-button:hover {
+  background-color: #f1f3f4;
+}
+
+.small-button {
+  background-color: #f1f3f4;
+  color: #5f6368;
+  border: none;
+  padding: 4px 8px;
+  border-radius: 4px;
+  font-size: 12px;
+  cursor: pointer;
+  margin-left: 8px;
+}
+
+.status-indicator {
+  display: flex;
+  align-items: center;
+  margin-bottom: 16px;
+}
+
+.icon {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  margin-right: 8px;
+  background-color: #34a853;
+}
+
+#status-text {
+  font-size: 14px;
+}
+
+#upcoming-list {
+  max-height: 150px;
+  overflow-y: auto;
+}
+
+.meeting-item {
+  padding: 8px;
+  border-bottom: 1px solid #f1f3f4;
+}
+
+.meeting-title {
+  font-weight: 500;
+  font-size: 14px;
+}
+
+.meeting-time {
+  font-size: 12px;
+  color: #5f6368;
+}
+
+.setting-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 14px;
+}
+
+select, input[type="checkbox"] {
+  border: 1px solid #dadce0;
+  border-radius: 4px;
+  padding: 4px 8px;
+}
+
+footer {
+  padding: 8px 16px;
+  text-align: center;
+  font-size: 12px;
+  color: #5f6368;
+  border-top: 1px solid #e0e0e0;
+}
+
+#version {
+  font-size: 11px;
+}
+
+/* Modal styles */
+.modal {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  background-color: rgba(0, 0, 0, 0.5);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+}
+
+.modal-content {
+  background-color: #fff;
+  padding: 20px;
+  border-radius: 8px;
+  max-width: 300px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+}
+
+.modal-content h2 {
+  margin-top: 0;
+}
+
+.modal-content ol {
+  margin-left: 20px;
+  margin-bottom: 16px;
+}
+
+.modal-content li {
+  margin-bottom: 8px;
+}
