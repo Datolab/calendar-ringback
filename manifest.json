@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "Google Calendar Callback",
+  "name": "Calendar Callback",
   "description": "Get an incoming call experience for your Google Calendar meetings with Meet links",
   "version": "1.0.0",
   "icons": {
@@ -33,7 +33,7 @@
     "https://meet.google.com/*"
   ],
   "oauth2": {
-    "client_id": "YOUR_CLIENT_ID_HERE",
+    "client_id": "723533017595-097cldsa6e5nv6pm1ghroe5bl88fugbe.apps.googleusercontent.com",
     "scopes": ["https://www.googleapis.com/auth/calendar.readonly"]
   }
 }
