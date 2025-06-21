@@ -197,7 +197,9 @@ async function getAuthToken() {
   return new Promise((resolve, reject) => {
     chrome.identity.getAuthToken({ interactive: false }, token => {
       if (chrome.runtime.lastError) {
-        reject(chrome.runtime.lastError);
+        console.log('Auth token error:', chrome.runtime.lastError.message);
+        // Resolve with null instead of rejecting to avoid uncaught promise rejection
+        resolve(null);
       } else {
         resolve(token);
       }
@@ -225,3 +227,19 @@ chrome.runtime.onInstalled.addListener(details => {
 
 // Initialize on startup
 chrome.runtime.onStartup.addListener(initialize);
+
+// Listen for messages from the popup
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.action === 'getUpcomingMeetings') {
+    chrome.storage.local.get('upcomingEvents', data => {
+      sendResponse({ meetings: data.upcomingEvents || [] });
+    });
+    return true; // Required for async sendResponse
+  } 
+  else if (message.action === 'authenticationUpdated') {
+    console.log('Authentication updated, refreshing...');
+    // Re-check auth and fetch calendar events
+    checkAuthStatus();
+    return true;
+  }
+});

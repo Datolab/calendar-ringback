@@ -5,6 +5,7 @@ A Chrome extension that monitors Google Calendar for upcoming meetings with Goog
 ## Overview
 
 This extension transforms how you join Google Meet meetings by:
+
 - Monitoring your Google Calendar for upcoming meetings
 - Displaying a phone-like incoming call screen when a meeting is about to start
 - Allowing you to answer (join), decline, or snooze the meeting notification
@@ -27,11 +28,13 @@ This extension transforms how you join Google Meet meetings by:
 ## Installation
 
 ### From Chrome Web Store (Coming Soon)
+
 1. Visit the Chrome Web Store
 2. Search for "Google Calendar Callback"
 3. Click "Add to Chrome"
 
 ### Developer Installation
+
 1. Clone this repository
 2. Create a Google Cloud Project and enable the Google Calendar API
 3. Configure the OAuth consent screen and create OAuth credentials
@@ -43,6 +46,7 @@ This extension transforms how you join Google Meet meetings by:
 ## Setup
 
 On first run, the extension will:
+
 1. Ask you to sign in with your Google account
 2. Request permission to access your Google Calendar
 3. Begin monitoring for upcoming meetings
@@ -50,6 +54,7 @@ On first run, the extension will:
 ## Configuration
 
 The extension popup allows you to configure:
+
 - Call notification timing (how many minutes before the meeting)
 - Auto-join option (automatically open the meeting when answering)
 - Ringtone selection
@@ -57,7 +62,8 @@ The extension popup allows you to configure:
 ## Development
 
 ### Project Structure
-```
+
+```bash
 manifest.json          # Extension configuration
 background.js          # Service worker for background tasks
 popup/
@@ -76,6 +82,7 @@ assets/
 ```
 
 ### Technologies Used
+
 - Chrome Extensions API (Manifest V3)
 - Google Calendar API
 - Chrome Identity API for OAuth authentication
@@ -84,6 +91,7 @@ assets/
 ## Privacy
 
 This extension:
+
 - Only requests the minimum calendar access needed (`calendar.readonly`)
 - Does not send your data to any third-party servers
 - Stores meeting information locally in your browser storage
