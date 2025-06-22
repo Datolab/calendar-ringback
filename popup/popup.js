@@ -122,8 +122,27 @@ document.addEventListener('DOMContentLoaded', () => {
         notSignedInSection.classList.add('hidden');
         signedInSection.classList.remove('hidden');
         
-        // Update email placeholder
-        document.getElementById('user-email').textContent = 'user@example.com';
+        // We're authenticated, but don't have email info from token directly
+        // Instead, let's get fresh identity info from Chrome
+        try {
+          // Request fresh identity information (interactive: true so the user can consent if needed)
+          const result = await new Promise((resolve) => {
+            chrome.identity.getProfileUserInfo({ accountStatus: 'ANY' }, (userInfo) => {
+              resolve(userInfo);
+            });
+          });
+          
+          if (result && result.email) {
+            // Store email for future use
+            await chrome.storage.local.set({ userEmail: result.email });
+            document.getElementById('user-email').textContent = result.email;
+          } else {
+            document.getElementById('user-email').textContent = 'Authenticated User';
+          }
+        } catch (error) {
+          console.error('Error getting profile info:', error);
+          document.getElementById('user-email').textContent = 'Authenticated User';
+        }
         
         // Check upcoming events
         loadUpcomingMeetings();
@@ -299,6 +318,30 @@ document.addEventListener('DOMContentLoaded', () => {
       setTimeout(() => {
         saveSettingsButton.textContent = 'Save Settings';
       }, 2000);
+    }
+  }
+  
+  /**
+   * Fetches user information from Google's userinfo endpoint using the OAuth token
+   * @param {string} token - The OAuth access token
+   * @returns {Promise<Object>} User information including email
+   */
+  async function fetchUserInfo(token) {
+    try {
+      const response = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch user info: ${response.status} ${response.statusText}`);
+      }
+      
+      return await response.json();
+    } catch (error) {
+      console.error('Error fetching user info:', error);
+      throw error;
     }
   }
   
