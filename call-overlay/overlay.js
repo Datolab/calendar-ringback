@@ -105,20 +105,25 @@ document.addEventListener('DOMContentLoaded', () => {
     try {
       // Get ringtone setting
       const { settings } = await chrome.storage.local.get('settings');
-      let soundFile = '../assets/ring-default.mp3';
+      let soundFile = '../assets/audio/classic-ring.mp3'; // Default to classic-ring if none specified
       
       if (settings && settings.ringtone) {
         switch (settings.ringtone) {
           case 'classic':
-            soundFile = '../assets/ring-classic.mp3';
+            soundFile = '../assets/audio/classic-ring.mp3';
             break;
           case 'digital':
-            soundFile = '../assets/ring-digital.mp3';
+            soundFile = '../assets/audio/digital-ring.mp3';
+            break;
+          case 'old':
+            soundFile = '../assets/audio/old-ring.mp3';
             break;
           default:
-            soundFile = '../assets/ring-default.mp3';
+            soundFile = '../assets/audio/classic-ring.mp3';
         }
       }
+      
+      console.log('Playing ringtone:', soundFile);
       
       // Set ringtone source
       ringtone.src = chrome.runtime.getURL(soundFile);

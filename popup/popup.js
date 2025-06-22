@@ -24,11 +24,12 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize
   initializePopup();
   
-  // Event Listeners
-  signInButton.addEventListener('click', handleSignIn);
-  signOutButton.addEventListener('click', handleSignOut);
-  testSoundButton.addEventListener('click', testRingtone);
+  // Add event listeners
+  document.getElementById('first-run-continue').addEventListener('click', handleFirstRunContinue);
+  document.getElementById('signin-button').addEventListener('click', handleSignIn);
+  document.getElementById('signout-button').addEventListener('click', handleSignOut);
   saveSettingsButton.addEventListener('click', saveSettings);
+  testSoundButton.addEventListener('click', testRingtone);
   firstRunContinue.addEventListener('click', handleFirstRunContinue);
   
   // Functions
@@ -303,17 +304,20 @@ document.addEventListener('DOMContentLoaded', () => {
   
   async function testRingtone() {
     const ringtone = ringtoneSelect.value;
-    let soundFile = 'assets/ring-default.mp3';
+    let soundFile = 'assets/audio/classic-ring.mp3';
     
     switch (ringtone) {
       case 'classic':
-        soundFile = 'assets/ring-classic.mp3';
+        soundFile = 'assets/audio/classic-ring.mp3';
         break;
       case 'digital':
-        soundFile = 'assets/ring-digital.mp3';
+        soundFile = 'assets/audio/digital-ring.mp3';
+        break;
+      case 'old':
+        soundFile = 'assets/audio/old-ring.mp3';
         break;
       default:
-        soundFile = 'assets/ring-default.mp3';
+        soundFile = 'assets/audio/classic-ring.mp3';
     }
     
     const audio = new Audio(chrome.runtime.getURL(soundFile));
