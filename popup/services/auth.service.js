@@ -224,59 +224,89 @@ class AuthService {
   }
 
   /**
-   * Fetch user information using the current token
-   * @returns {Promise<Object>} User information
+  /**
+   * Get the user's Google profile information
+   * @param {boolean} silentFail - Whether to silently fail without logging errors
+   * @returns {Promise<Object>} User profile data
    */
-  async getUserInfo() {
+  async getUserInfo(silentFail = false) {
     try {
-      if (!this.token) {
-        throw new Error('No auth token available');
-      }
-      
+      // Return cached user info if available
       if (this.userInfo) {
         return this.userInfo;
       }
       
-      const response = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+      // Get the token directly - more reliable than isAuthenticated()
+      // which sometimes returns false even when a token exists
+      let token;
+      try {
+        token = await new Promise(resolve => {
+          chrome.storage.local.get('oauth_token', result => resolve(result && result.oauth_token));
+        });
+      } catch (e) {
+        if (!silentFail) console.warn('Error checking token in storage:', e);
+      }
+      
+      if (!token) {
+        if (!silentFail) {
+          console.log('No authentication token available for getUserInfo');
+        }
+        return { email: 'user@example.com' };
+      }
+      
+      const url = 'https://www.googleapis.com/oauth2/v1/userinfo?alt=json';
+      const response = await fetch(url, {
         headers: {
-          'Authorization': `Bearer ${this.token}`
+          'Authorization': `Bearer ${token}`
         }
       });
       
       if (!response.ok) {
-        // If token expired (401), attempt refresh
+        // Handle 401 unauthorized (expired token)
         if (response.status === 401) {
-          console.log('Token expired (401), attempting refresh...');
+          console.log('Token expired (401), attempting to refresh...');
           const newToken = await this.refreshToken();
           
-          // Retry with new token
-          const retryResponse = await fetch('https://www.googleapis.com/oauth2/v2/userinfo', {
+          // Retry the request with the new token
+          const retryResponse = await fetch(url, {
             headers: {
               'Authorization': `Bearer ${newToken}`
             }
           });
           
           if (!retryResponse.ok) {
-            throw new Error(`Failed to fetch user info: ${retryResponse.status} ${retryResponse.statusText}`);
+            if (!silentFail) {
+              console.warn(`Failed to fetch user info after token refresh: ${retryResponse.status}`);
+            }
+            return { email: 'user@example.com' };
           }
           
           this.userInfo = await retryResponse.json();
           return this.userInfo;
         }
         
-        throw new Error(`Failed to fetch user info: ${response.status} ${response.statusText}`);
+        if (!silentFail) {
+          console.warn(`Failed to fetch user info: ${response.status}`);
+        }
+        return { email: 'user@example.com' };
       }
       
       this.userInfo = await response.json();
       return this.userInfo;
     } catch (error) {
-      errorTracker.logError('Error fetching user info', { error });
+      // Only log the error if not in silent mode
+      if (!silentFail) {
+        // Use console.warn instead of error tracker to reduce noise
+        console.warn('Error fetching user info:', error.message);
+      }
       
       // Fallback: try to get profile from chrome identity API
       try {
         return await this._getProfileUserInfo();
       } catch (fallbackError) {
-        errorTracker.logError('Fallback user info also failed', { error: fallbackError });
+        if (!silentFail) {
+          console.warn('Fallback user info also failed');
+        }
         return { email: 'user@example.com' }; // Default fallback
       }
     }

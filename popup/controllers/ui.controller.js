@@ -603,14 +603,14 @@ class UIController {
   async _displayUserEmail() {
     try {
       if (this.elements.userEmailSpan) {
-        // Get user info
-        const userInfo = await authService.getUserInfo();
+        // Get user info with silent error handling during initialization
+        const userInfo = await authService.getUserInfo(true);
         
         // Display email
         this.elements.userEmailSpan.textContent = userInfo.email || 'user@example.com';
       }
     } catch (error) {
-      errorTracker.logError('Failed to display user email', { error });
+      console.warn('Failed to display user email:', error.message);
       if (this.elements.userEmailSpan) {
         this.elements.userEmailSpan.textContent = 'user@example.com';
       }
