@@ -37,7 +37,7 @@
     "client_id": "723533017595-jibsk9snnl6hl79h7tke3h3aa1itf95r.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/calendar.readonly",
-      "https://www.googleapis.com/auth/gmail.readonly"
+      "https://www.googleapis.com/auth/userinfo.email"
     ]
   }
 }

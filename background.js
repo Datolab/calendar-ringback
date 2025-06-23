@@ -1,6 +1,27 @@
 // Google Calendar Callback Extension - Background Service Worker
 // Responsible for calendar monitoring and triggering call notifications
 
+// Error handling for service worker
+function logError(error, context = 'general') {
+  console.error(`Calendar Callback Error [${context}]:`, error);
+  
+  // Store error in chrome.storage for later reporting
+  chrome.storage.local.get('error_logs', (data) => {
+    const logs = data.error_logs || [];
+    logs.unshift({
+      timestamp: new Date().toISOString(),
+      error: error.message || String(error),
+      stack: error.stack,
+      context
+    });
+    
+    // Limit log size
+    if (logs.length > 50) logs.length = 50;
+    
+    chrome.storage.local.set({ 'error_logs': logs });
+  });
+}
+
 // Configuration
 const CONFIG = {
   POLLING_INTERVAL: 30, // seconds
@@ -30,21 +51,82 @@ async function initialize() {
 }
 
 // Check OAuth authentication status
-async function checkAuthStatus() {
+async function checkAuthStatus(interactive = false) {
   try {
-    const token = await getAuthToken();
+    console.log(`Checking auth status (interactive: ${interactive})`);
+    
+    // First try to get token non-interactively
+    let token = await getAuthToken(interactive);
+    
+    // If no token and we're allowed to be interactive, try interactive auth
+    if (!token && interactive) {
+      console.log('No token found, trying interactive authentication...');
+      token = await getAuthToken(true);
+    }
+    
     isAuthenticated = !!token;
     
     if (isAuthenticated) {
       console.log('User is authenticated, starting calendar monitoring');
       fetchUpcomingEvents();
+      
+      // Safely notify popup that authentication was successful
+      await safelySendMessageToPopup({ action: 'authUpdated', authenticated: true });
+    } else if (interactive) {
+      console.log('Interactive authentication failed');
+      // Notify popup that authentication failed
+      await safelySendMessageToPopup({ 
+        action: 'authUpdated', 
+        authenticated: false,
+        error: 'Failed to authenticate. Please try again.'
+      });
     } else {
-      console.log('User is not authenticated, prompting for auth');
-      // Will prompt user for authentication in popup
+      console.log('User is not authenticated');
+      // Notify popup that we need authentication
+      await safelySendMessageToPopup({ 
+        action: 'authNeeded',
+        message: 'Please sign in to continue.'
+      });
     }
+    
+    return isAuthenticated;
   } catch (error) {
     console.error('Error checking authentication status:', error);
+    // Notify popup about the error
+    await safelySendMessageToPopup({
+      action: 'authError',
+      error: error.message || 'Unknown authentication error'
+    });
+    return false;
   }
+}
+
+/**
+ * Safely sends a message to the popup if it's open
+ * @param {Object} message - The message to send
+ * @returns {Promise} - A promise that resolves when the message is sent or ignored
+ */
+async function safelySendMessageToPopup(message) {
+  return new Promise((resolve) => {
+    try {
+      // In MV3, we can't check if popup is open with getViews
+      // Just try to send the message and handle any errors
+      chrome.runtime.sendMessage(message, (response) => {
+        // Handle any response or error
+        if (chrome.runtime.lastError) {
+          // This is normal if popup isn't open - don't treat as error
+          console.log('Info: Message not delivered (popup likely closed):', 
+                      chrome.runtime.lastError.message);
+        } else if (response) {
+          console.log('Popup response:', response);
+        }
+        resolve();
+      });
+    } catch (error) {
+      console.log('Error sending message to popup:', error);
+      resolve(); // Always resolve to avoid hanging promises
+    }
+  });
 }
 
 // Handle alarms
@@ -193,16 +275,39 @@ function triggerCallOverlay(eventId) {
 }
 
 // Helper function to get authentication token
-async function getAuthToken() {
-  return new Promise((resolve, reject) => {
-    chrome.identity.getAuthToken({ interactive: false }, token => {
+async function getAuthToken(interactive = false) {
+  return new Promise((resolve) => {
+    console.log(`Getting auth token (interactive: ${interactive})`);
+    
+    // Check for stored token in local storage first
+    chrome.storage.local.get(['oauth_token', 'token_expiry'], (data) => {
       if (chrome.runtime.lastError) {
-        console.log('Auth token error:', chrome.runtime.lastError.message);
-        // Resolve with null instead of rejecting to avoid uncaught promise rejection
+        console.error('Error accessing storage:', chrome.runtime.lastError);
         resolve(null);
-      } else {
-        resolve(token);
+        return;
       }
+      
+      const token = data.oauth_token;
+      const expiry = data.token_expiry;
+      
+      // If we have a token and it's not expired
+      if (token && expiry && Date.now() < expiry) {
+        console.log('Using stored token from storage');
+        resolve(token);
+        return;
+      }
+      
+      // No valid token in storage
+      if (!interactive) {
+        console.log('No valid token found in storage and interactive auth not requested');
+        resolve(null);
+        return;
+      }
+      
+      // If interactive is requested, let the popup handle the authentication flow
+      // via WebAuthFlow since getAuthToken has issues
+      console.log('Interactive auth requested - deferring to popup WebAuthFlow');
+      resolve(null);
     });
   });
 }
