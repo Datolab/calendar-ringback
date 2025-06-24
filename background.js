@@ -160,7 +160,7 @@ async function handleAlarm(alarm) {
   }
 }
 
-// Fetch upcoming calendar events
+// Fetch upcoming calendar events with pagination support
 async function fetchUpcomingEvents() {
   try {
     // Get token from AuthService
@@ -180,67 +180,191 @@ async function fetchUpcomingEvents() {
     
     console.log(`Fetching calendar events from ${timeMin} to ${timeMax}`);
     
-    // Make API call to Google Calendar
-    const response = await fetch(
-      `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&singleEvents=true&orderBy=startTime`, 
-      {
+    // Initialize storage for all events
+    let allEvents = [];
+    let nextPageToken = null;
+    let pageCount = 0;
+    const MAX_PAGES = 5; // Safety limit to prevent infinite loops
+    
+    // Process pages until we have all events or hit the max page limit
+    do {
+      // Build URL with pagination token if we have one
+      let url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&singleEvents=true&orderBy=startTime`;
+      
+      if (nextPageToken) {
+        url += `&pageToken=${nextPageToken}`;
+        console.log(`Fetching additional page ${pageCount + 1} of calendar events`);
+      }
+      
+      // Make API call to Google Calendar
+      const response = await fetch(url, {
         headers: {
           'Authorization': `Bearer ${token}`
         }
-      }
-    );
-    
-    if (!response.ok) {
-      // Handle 401 unauthorized (expired token)
-      if (response.status === 401) {
-        console.log('Token expired (401), attempting to refresh...');
-        // Use AuthService to refresh the token
-        await authService.refreshToken();
+      });
+      
+      if (!response.ok) {
+        // Handle 401 unauthorized (expired token)
+        if (response.status === 401) {
+          console.log('Token expired (401), attempting to refresh...');
+          // Use AuthService to refresh the token
+          await authService.refreshToken();
+          
+          // Retry the fetch with new token
+          return fetchUpcomingEvents();
+        }
         
-        // Retry the fetch with new token
-        return fetchUpcomingEvents();
+        throw new Error(`Calendar API error: ${response.status} - ${await response.text()}`);
       }
       
-      throw new Error(`Calendar API error: ${response.status}`);
+      const data = await response.json();
+      pageCount++;
+      
+      // Process the current page of results
+      if (data.items && data.items.length > 0) {
+        allEvents = allEvents.concat(data.items);
+        console.log(`Added ${data.items.length} events from page ${pageCount}, total: ${allEvents.length}`);
+      }
+      
+      // Get the next page token if available
+      nextPageToken = data.nextPageToken || null;
+      
+    } while (nextPageToken && pageCount < MAX_PAGES);
+    
+    if (pageCount >= MAX_PAGES && nextPageToken) {
+      console.warn(`Reached maximum page limit (${MAX_PAGES}). Some events may not be processed.`);
     }
     
-    const data = await response.json();
-    
-    if (!data.items) {
+    // If we didn't find any events at all
+    if (allEvents.length === 0) {
       console.log('No upcoming events found');
       return;
     }
     
+    // Process all the events we found
+    console.log(`Successfully fetched ${allEvents.length} calendar events`);
+    
+    // Use the events as if they came from a single request
+    const data = { items: allEvents };
+    
     // Filter for events with Google Meet links
     const eventsWithMeet = data.items.filter(event => {
-      // Check if user has accepted the event
-      const selfAttendee = event.attendees?.find(attendee => attendee.self);
-      const hasAccepted = !selfAttendee || selfAttendee.responseStatus === 'accepted';
-      
-      // Check for Google Meet link
-      const hasMeetLink = event.hangoutLink || 
-                         (event.conferenceData?.conferenceId && 
-                          event.conferenceData?.conferenceSolution?.name === 'Google Meet');
-                          
-      return hasAccepted && hasMeetLink;
+      try {
+        // Check if user has accepted the event
+        const selfAttendee = event.attendees?.find(attendee => attendee.self);
+        const hasAccepted = !selfAttendee || selfAttendee.responseStatus === 'accepted';
+        
+        // Check for Google Meet link
+        const hasMeetLink = event.hangoutLink || 
+                           (event.conferenceData?.conferenceId && 
+                            event.conferenceData?.conferenceSolution?.name === 'Google Meet');
+                            
+        return hasAccepted && hasMeetLink;
+      } catch (eventError) {
+        // Handle malformed events gracefully
+        console.warn('Skipping malformed event:', eventError.message, event.id || 'unknown ID');
+        logError(eventError, 'event_processing');
+        return false;
+      }
     });
     
+    console.log(`Found ${eventsWithMeet.length} upcoming events with Google Meet links`);
     processUpcomingEvents(eventsWithMeet);
     
   } catch (error) {
     console.error('Error fetching calendar events:', error);
+    logError(error, 'calendar_fetch');
+    
+    // Handle specific error types
+    if (error.message && error.message.includes('quota')) {
+      console.warn('Calendar API quota exceeded. Will retry on next polling cycle.');
+      // Store error state for UI feedback
+      chrome.storage.local.set({
+        calendarApiState: {
+          lastError: 'quota_exceeded',
+          timestamp: Date.now(),
+          message: 'Calendar API quota exceeded. Will retry automatically.'
+        }
+      });
+    } else if (error.message && (error.message.includes('network') || error.message.includes('failed'))) {
+      console.warn('Network error when fetching events. Will retry on next polling cycle.');
+      // Store error state for UI feedback
+      chrome.storage.local.set({
+        calendarApiState: {
+          lastError: 'network_error',
+          timestamp: Date.now(),
+          message: 'Network error. Will retry automatically.'
+        }
+      });
+    } else {
+      // Generic error handling
+      chrome.storage.local.set({
+        calendarApiState: {
+          lastError: 'unknown_error',
+          timestamp: Date.now(),
+          message: error.message || 'Unknown error fetching calendar data.'
+        }
+      });
+    }
+  } finally {
+    // Always update the last fetch timestamp regardless of success/failure
+    chrome.storage.local.set({
+      lastCalendarFetch: Date.now()
+    });
   }
 }
 
 // Process the list of upcoming events
 function processUpcomingEvents(events) {
-  // Store the events
-  chrome.storage.local.set({ upcomingEvents: events });
+  // Enhanced event processing with better logging
+  console.log(`Processing ${events.length} upcoming events`);
+  
+  // Handle recurring events more intelligently
+  // Group events by their recurring event ID if available
+  const groupedEvents = {};
+  const nonRecurringEvents = [];
+  
+  events.forEach(event => {
+    // Check if it's part of a recurring series
+    if (event.recurringEventId) {
+      if (!groupedEvents[event.recurringEventId]) {
+        groupedEvents[event.recurringEventId] = [];
+      }
+      groupedEvents[event.recurringEventId].push(event);
+    } else {
+      nonRecurringEvents.push(event);
+    }
+  });
+  
+  // Log recurring event stats if any found
+  const recurringSeriesCount = Object.keys(groupedEvents).length;
+  if (recurringSeriesCount > 0) {
+    console.log(`Found ${recurringSeriesCount} recurring meeting series`);
+    
+    // For each recurring series, ensure we only process the next occurrence
+    Object.values(groupedEvents).forEach(seriesEvents => {
+      // Sort by start time (earliest first)
+      seriesEvents.sort((a, b) => {
+        const aTime = new Date(a.start.dateTime || a.start.date).getTime();
+        const bTime = new Date(b.start.dateTime || b.start.date).getTime();
+        return aTime - bTime;
+      });
+      
+      // Add only the next occurrence to our non-recurring list
+      if (seriesEvents.length > 0) {
+        nonRecurringEvents.push(seriesEvents[0]);
+      }
+    });
+  }
+  
+  // Store all the processed events (next occurrence of recurring + non-recurring) 
+  chrome.storage.local.set({ upcomingEvents: nonRecurringEvents });
+  console.log(`Stored ${nonRecurringEvents.length} events (after recurring event processing)`);
   
   // Set alarms for events that are coming up soon
   const now = new Date();
   
-  events.forEach(event => {
+  nonRecurringEvents.forEach(event => {
     const startTime = new Date(event.start.dateTime || event.start.date);
     const minutesUntilEvent = (startTime - now) / (1000 * 60);
     
@@ -257,9 +381,11 @@ function processUpcomingEvents(events) {
           
           // Only set alarm if it's in the future
           if (alarmTime > now) {
+            console.log(`Setting alarm for "${event.summary || 'Unnamed meeting'}" at ${alarmTime.toLocaleTimeString()}`);
             chrome.alarms.create(alarmName, { when: alarmTime.getTime() });
           } else {
             // Event is happening now or very soon, trigger immediately
+            console.log(`Event "${event.summary || 'Unnamed meeting'}" starting now, triggering immediately`);
             triggerCallOverlay(event.id);
           }
         }
@@ -270,47 +396,95 @@ function processUpcomingEvents(events) {
 
 // Trigger the call overlay for a specific event
 function triggerCallOverlay(eventId) {
-  chrome.storage.local.get(['upcomingEvents', 'processedEvents'], data => {
-    const event = data.upcomingEvents?.find(e => e.id === eventId);
-    const processedEvents = data.processedEvents || [];
-    
-    // Make sure event exists and hasn't been processed yet
-    if (event && !processedEvents.includes(eventId)) {
-      // Add to processed events to prevent duplicate notifications
-      processedEvents.push(eventId);
-      chrome.storage.local.set({ processedEvents });
-      
-      // Extract meeting details
-      const meetingDetails = {
-        id: event.id,
-        title: event.summary || 'Unnamed meeting',
-        startTime: event.start.dateTime || event.start.date,
-        meetLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri,
-        attendees: event.attendees || []
-      };
-      
-      // Open call overlay window
-      chrome.windows.create({
-        url: `call-overlay/overlay.html?meeting=${encodeURIComponent(JSON.stringify(meetingDetails))}`,
-        type: 'popup',
-        width: 500,
-        height: 700
-      });
-      
-      // Also create a notification as fallback
-      chrome.notifications.create(`meeting_${eventId}`, {
-        type: 'basic',
-        iconUrl: '/assets/icons/icon128.png',
-        title: 'Incoming Meeting',
-        message: meetingDetails.title,
-        buttons: [
-          { title: 'Join' },
-          { title: 'Dismiss' }
-        ],
-        priority: 2
-      });
-    }
-  });
+  try {
+    chrome.storage.local.get(['upcomingEvents', 'processedEvents', 'settings'], data => {
+      try {
+        const event = data.upcomingEvents?.find(e => e.id === eventId);
+        const processedEvents = data.processedEvents || [];
+        const settings = data.settings || { autoJoin: false, ringtone: 'default' };
+        
+        // Make sure event exists and hasn't been processed yet
+        if (event && !processedEvents.includes(eventId)) {
+          console.log(`Triggering call overlay for event: ${event.summary || 'Unnamed meeting'}`);
+          
+          // Add to processed events to prevent duplicate notifications
+          processedEvents.push(eventId);
+          chrome.storage.local.set({ processedEvents });
+          
+          // Extract meeting details
+          const meetingDetails = {
+            id: event.id,
+            title: event.summary || 'Unnamed meeting',
+            startTime: event.start.dateTime || event.start.date,
+            meetLink: event.hangoutLink || event.conferenceData?.entryPoints?.[0]?.uri,
+            attendees: event.attendees || [],
+            location: event.location || '',
+            description: event.description || '',
+            settings: settings
+          };
+          
+          // Ensure we have a valid meeting link
+          if (!meetingDetails.meetLink) {
+            console.warn('Event has no valid meeting link:', eventId);
+            meetingDetails.meetLink = ''; // Provide empty string as fallback
+          }
+          
+          // Open call overlay window
+          chrome.windows.create({
+            url: `call-overlay/overlay.html?meeting=${encodeURIComponent(JSON.stringify(meetingDetails))}`,
+            type: 'popup',
+            width: 500,
+            height: 700
+          }, (window) => {
+            if (chrome.runtime.lastError) {
+              console.error('Failed to open call overlay window:', chrome.runtime.lastError);
+              // Make sure notification is shown as fallback
+              showMeetingNotification(eventId, meetingDetails);
+            } else {
+              console.log('Call overlay window opened successfully');
+            }
+          });
+          
+          // Always show notification even if window opens (belt and suspenders approach)
+          showMeetingNotification(eventId, meetingDetails);
+        } else if (!event) {
+          console.warn(`Cannot find event details for ID: ${eventId}`);
+        } else {
+          console.log(`Event ${eventId} has already been processed, ignoring`);
+        }
+      } catch (overlayError) {
+        console.error('Error in triggerCallOverlay:', overlayError);
+        logError(overlayError, 'call_overlay');
+      }
+    });
+  } catch (error) {
+    console.error('Critical error in triggerCallOverlay:', error);
+    logError(error, 'call_overlay_critical');
+  }
+}
+
+// Helper function to show meeting notification
+function showMeetingNotification(eventId, meetingDetails) {
+  try {
+    chrome.notifications.create(`meeting_${eventId}`, {
+      type: 'basic',
+      iconUrl: '/assets/icons/icon128.png',
+      title: 'Incoming Meeting',
+      message: meetingDetails.title,
+      buttons: [
+        { title: 'Join' },
+        { title: 'Dismiss' }
+      ],
+      priority: 2
+    }, (notificationId) => {
+      if (chrome.runtime.lastError) {
+        console.error('Notification creation failed:', chrome.runtime.lastError);
+      }
+    });
+  } catch (notificationError) {
+    console.error('Failed to create notification:', notificationError);
+    logError(notificationError, 'notification_create');
+  }
 }
 
 // This function is now deprecated as we're using authService
