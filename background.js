@@ -1,6 +1,9 @@
 // Google Calendar Callback Extension - Background Service Worker
 // Responsible for calendar monitoring and triggering call notifications
 
+// Import the AuthService
+import authService from './popup/services/auth.service.js';
+
 // Error handling for service worker
 function logError(error, context = 'general') {
   console.error(`Calendar Callback Error [${context}]:`, error);
@@ -38,8 +41,11 @@ let upcomingEvents = [];
 async function initialize() {
   console.log('Calendar Callback Extension: Initializing background service worker');
   
+  // Initialize auth service first
+  await authService.initialize();
+  
   // Check for authentication status
-  checkAuthStatus();
+  await checkAuthStatus();
   
   // Set up alarm for regular polling
   chrome.alarms.create('calendarPolling', {
@@ -55,20 +61,32 @@ async function checkAuthStatus(interactive = false) {
   try {
     console.log(`Checking auth status (interactive: ${interactive})`);
     
-    // First try to get token non-interactively
-    let token = await getAuthToken(interactive);
+    // Use authService to check authentication status
+    isAuthenticated = await authService.isAuthenticated();
     
-    // If no token and we're allowed to be interactive, try interactive auth
-    if (!token && interactive) {
-      console.log('No token found, trying interactive authentication...');
-      token = await getAuthToken(true);
+    // If not authenticated and interactive mode is allowed, try interactive auth
+    if (!isAuthenticated && interactive) {
+      console.log('Not authenticated, trying interactive authentication...');
+      try {
+        await authService.signIn();
+        isAuthenticated = await authService.isAuthenticated();
+      } catch (authError) {
+        console.error('Interactive authentication failed:', authError);
+        isAuthenticated = false;
+      }
     }
-    
-    isAuthenticated = !!token;
     
     if (isAuthenticated) {
       console.log('User is authenticated, starting calendar monitoring');
       fetchUpcomingEvents();
+      
+      // Get user info
+      try {
+        const userInfo = await authService.getUserInfo(true); // silent mode
+        console.log('User authenticated as:', userInfo.email);
+      } catch (e) {
+        // Ignore errors when getting user info
+      }
       
       // Safely notify popup that authentication was successful
       await safelySendMessageToPopup({ action: 'authUpdated', authenticated: true });
@@ -92,6 +110,7 @@ async function checkAuthStatus(interactive = false) {
     return isAuthenticated;
   } catch (error) {
     console.error('Error checking authentication status:', error);
+    logError(error, 'auth_check');
     // Notify popup about the error
     await safelySendMessageToPopup({
       action: 'authError',
@@ -144,8 +163,12 @@ async function handleAlarm(alarm) {
 // Fetch upcoming calendar events
 async function fetchUpcomingEvents() {
   try {
-    const token = await getAuthToken();
-    if (!token) return;
+    // Get token from AuthService
+    const token = authService.getToken();
+    if (!token) {
+      console.log('No auth token available, skipping calendar fetch');
+      return;
+    }
     
     // Calculate time range for API query
     const now = new Date();
@@ -155,7 +178,9 @@ async function fetchUpcomingEvents() {
     future.setMinutes(now.getMinutes() + CONFIG.UPCOMING_EVENT_THRESHOLD);
     const timeMax = future.toISOString();
     
-    // TODO: Implement actual API call to Google Calendar
+    console.log(`Fetching calendar events from ${timeMin} to ${timeMax}`);
+    
+    // Make API call to Google Calendar
     const response = await fetch(
       `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&singleEvents=true&orderBy=startTime`, 
       {
@@ -164,6 +189,20 @@ async function fetchUpcomingEvents() {
         }
       }
     );
+    
+    if (!response.ok) {
+      // Handle 401 unauthorized (expired token)
+      if (response.status === 401) {
+        console.log('Token expired (401), attempting to refresh...');
+        // Use AuthService to refresh the token
+        await authService.refreshToken();
+        
+        // Retry the fetch with new token
+        return fetchUpcomingEvents();
+      }
+      
+      throw new Error(`Calendar API error: ${response.status}`);
+    }
     
     const data = await response.json();
     
@@ -274,10 +313,11 @@ function triggerCallOverlay(eventId) {
   });
 }
 
-// Helper function to get authentication token
-async function getAuthToken(interactive = false) {
+// This function is now deprecated as we're using authService
+// Kept for reference in case we need to fallback to the old implementation
+async function _legacyGetAuthToken(interactive = false) {
   return new Promise((resolve) => {
-    console.log(`Getting auth token (interactive: ${interactive})`);
+    console.log(`[LEGACY] Getting auth token (interactive: ${interactive})`);
     
     // Check for stored token in local storage first
     chrome.storage.local.get(['oauth_token', 'token_expiry'], (data) => {
@@ -343,8 +383,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } 
   else if (message.action === 'authenticationUpdated') {
     console.log('Authentication updated, refreshing...');
-    // Re-check auth and fetch calendar events
-    checkAuthStatus();
+    // Re-initialize authService and re-check auth status
+    authService.initialize().then(() => checkAuthStatus());
     return true;
   }
 });
