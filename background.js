@@ -1,7 +1,10 @@
 // Google Calendar Callback Extension - Background Service Worker
 // Responsible for calendar monitoring and triggering call notifications
 
-// Import the AuthService
+// Import services
+import errorTracker from './utils/error-tracking.js';
+
+// Import the AuthService singleton for token management
 import authService from './popup/services/auth.service.js';
 
 // Error handling for service worker
@@ -25,17 +28,23 @@ function logError(error, context = 'general') {
   });
 }
 
-// Configuration
-const CONFIG = {
-  POLLING_INTERVAL: 30, // seconds
-  UPCOMING_EVENT_THRESHOLD: 10, // minutes to look ahead for events
-  CALL_TRIGGER_THRESHOLD: 5, // minutes before event to trigger call
-  ALARM_OFFSET: 30 // seconds before event to trigger alarm
-};
+// Constants
+const CALENDAR_ALARM_NAME = 'calendarPolling'; // Alarm name for polling calendar
+const CALENDAR_POLLING_INTERVAL = 5; // Minutes between calendar polls
+const EVENT_TRIGGER_THRESHOLD = 5; // Minutes before event to trigger alarm
+const MAX_PAGES = 3; // Maximum number of calendar API result pages to process
+const MAX_EVENTS_TO_LOG = 5; // Maximum number of events to log details for
+const DEBUG = true; // Enable debug logging (can be toggled in settings)
+const POPUP_STATUS_INTERVAL = 60; // Seconds between status updates to popup when open
 
 // State
 let isAuthenticated = false;
-let upcomingEvents = [];
+let upcomingMeetings = [];
+let lastPollTime = null;
+let lastError = null;
+let isPolling = false;
+let popupUpdateInterval = null;
+let popupPort = null; // Connection port to popup
 
 // Initialize the extension
 async function initialize() {
@@ -48,8 +57,8 @@ async function initialize() {
   await checkAuthStatus();
   
   // Set up alarm for regular polling
-  chrome.alarms.create('calendarPolling', {
-    periodInMinutes: CONFIG.POLLING_INTERVAL / 60
+  chrome.alarms.create(CALENDAR_ALARM_NAME, {
+    periodInMinutes: CALENDAR_POLLING_INTERVAL
   });
   
   // Listen for alarm events
@@ -89,22 +98,22 @@ async function checkAuthStatus(interactive = false) {
       }
       
       // Safely notify popup that authentication was successful
-      await safelySendMessageToPopup({ action: 'authUpdated', authenticated: true });
+      sendMessageToPopup({ action: 'authUpdated', authenticated: true }, true);
     } else if (interactive) {
       console.log('Interactive authentication failed');
       // Notify popup that authentication failed
-      await safelySendMessageToPopup({ 
+      sendMessageToPopup({ 
         action: 'authUpdated', 
         authenticated: false,
         error: 'Failed to authenticate. Please try again.'
-      });
+      }, true);
     } else {
       console.log('User is not authenticated');
       // Notify popup that we need authentication
-      await safelySendMessageToPopup({ 
+      sendMessageToPopup({ 
         action: 'authNeeded',
         message: 'Please sign in to continue.'
-      });
+      }, true);
     }
     
     return isAuthenticated;
@@ -112,45 +121,99 @@ async function checkAuthStatus(interactive = false) {
     console.error('Error checking authentication status:', error);
     logError(error, 'auth_check');
     // Notify popup about the error
-    await safelySendMessageToPopup({
+    sendMessageToPopup({
       action: 'authError',
       error: error.message || 'Unknown authentication error'
-    });
+    }, true);
     return false;
   }
 }
 
 /**
- * Safely sends a message to the popup if it's open
- * @param {Object} message - The message to send
- * @returns {Promise} - A promise that resolves when the message is sent or ignored
+ * Send a status update to the popup if it's open
+ * @param {object} message - The message to send
+ * @param {boolean} forceSend - Whether to force sending even if not connected
  */
-async function safelySendMessageToPopup(message) {
-  return new Promise((resolve) => {
-    try {
-      // In MV3, we can't check if popup is open with getViews
-      // Just try to send the message and handle any errors
-      chrome.runtime.sendMessage(message, (response) => {
-        // Handle any response or error
-        if (chrome.runtime.lastError) {
-          // This is normal if popup isn't open - don't treat as error
-          console.log('Info: Message not delivered (popup likely closed):', 
-                      chrome.runtime.lastError.message);
-        } else if (response) {
-          console.log('Popup response:', response);
-        }
-        resolve();
-      });
-    } catch (error) {
-      console.log('Error sending message to popup:', error);
-      resolve(); // Always resolve to avoid hanging promises
+function sendMessageToPopup(message, forceSend = false) {
+  try {
+    // If we have an active port connection to the popup, use that
+    if (popupPort) {
+      try {
+        popupPort.postMessage(message);
+        return true;
+      } catch (portError) {
+        // Handle case where port might appear valid but is disconnected
+        console.log('Port appears disconnected, clearing reference:', portError.message);
+        popupPort = null;
+        // Continue to runtime messaging fallback if forceSend is true
+      }
     }
-  });
+    
+    // Otherwise fall back to runtime messaging
+    if (forceSend) {
+      chrome.runtime.sendMessage(message, response => {
+        // Handle runtime.lastError to prevent unchecked error logs
+        if (chrome.runtime.lastError) {
+          // Just log at debug level since this is expected when popup is closed
+          console.debug('Message not delivered (popup likely closed):', chrome.runtime.lastError.message);
+        }
+      });
+    }
+    
+    return false;
+  } catch (error) {
+    console.error('Failed to send message to popup:', error);
+    logError(error, 'popup_messaging');
+    return false;
+  }
+}
+
+/**
+ * Sends a comprehensive status update to the popup
+ * Includes authentication status, upcoming meetings, and last poll time
+ */
+async function sendStatusUpdateToPopup() {
+  try {
+    // Check authentication status
+    const isAuthenticated = await authService.isAuthenticated();
+    
+    // Get user info if authenticated
+    let userInfo = null;
+    if (isAuthenticated) {
+      try {
+        userInfo = await authService.getUserInfo(true); // silent fail
+      } catch (userInfoError) {
+        console.debug('Could not fetch user info:', userInfoError.message);
+      }
+    }
+    
+    // Prepare status message
+    const statusMessage = {
+      action: 'statusUpdate',
+      data: {
+        authenticated: isAuthenticated,
+        userInfo: userInfo,
+        lastPollTime: lastPollTime ? lastPollTime.toISOString() : null,
+        lastError: lastError,
+        upcomingMeetings: upcomingMeetings,
+        isPolling: isPolling,
+        pollInterval: CALENDAR_POLLING_INTERVAL,
+        triggerThreshold: EVENT_TRIGGER_THRESHOLD
+      }
+    };
+    
+    // Send the status update
+    sendMessageToPopup(statusMessage, true); // Use force send option since this is important
+  } catch (error) {
+    console.error('Error sending status update to popup:', error);
+    logError(error, 'status_update');
+    // No need to re-throw; this is a background task
+  }
 }
 
 // Handle alarms
 async function handleAlarm(alarm) {
-  if (alarm.name === 'calendarPolling') {
+  if (alarm.name === CALENDAR_ALARM_NAME) {
     if (isAuthenticated) {
       await fetchUpcomingEvents();
     }
@@ -175,7 +238,7 @@ async function fetchUpcomingEvents() {
     const timeMin = now.toISOString();
     
     const future = new Date(now);
-    future.setMinutes(now.getMinutes() + CONFIG.UPCOMING_EVENT_THRESHOLD);
+    future.setMinutes(now.getMinutes() + 10);
     const timeMax = future.toISOString();
     
     console.log(`Fetching calendar events from ${timeMin} to ${timeMax}`);
@@ -369,7 +432,7 @@ function processUpcomingEvents(events) {
     const minutesUntilEvent = (startTime - now) / (1000 * 60);
     
     // If event is within call trigger threshold and doesn't have an alarm yet
-    if (minutesUntilEvent <= CONFIG.CALL_TRIGGER_THRESHOLD) {
+    if (minutesUntilEvent <= EVENT_TRIGGER_THRESHOLD) {
       const alarmName = `eventReminder_${event.id}`;
       
       // Check if we already have an alarm for this
@@ -377,7 +440,7 @@ function processUpcomingEvents(events) {
         if (!alarm) {
           // Calculate when to trigger the alarm (30 seconds before event)
           const alarmTime = new Date(startTime);
-          alarmTime.setSeconds(alarmTime.getSeconds() - CONFIG.ALARM_OFFSET);
+          alarmTime.setSeconds(alarmTime.getSeconds() - 30);
           
           // Only set alarm if it's in the future
           if (alarmTime > now) {
@@ -547,18 +610,157 @@ chrome.runtime.onInstalled.addListener(details => {
 // Initialize on startup
 chrome.runtime.onStartup.addListener(initialize);
 
-// Listen for messages from the popup
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message.action === 'getUpcomingMeetings') {
-    chrome.storage.local.get('upcomingEvents', data => {
-      sendResponse({ meetings: data.upcomingEvents || [] });
+// Set up connection management for popup
+chrome.runtime.onConnect.addListener(port => {
+  if (port.name === 'popup') {
+    console.log('Popup connected');
+    
+    // Store the port for later use
+    popupPort = port;
+    
+    // Send an immediate status update
+    sendStatusUpdateToPopup();
+    
+    // Set up periodic status updates while popup is open
+    if (popupUpdateInterval) {
+      clearInterval(popupUpdateInterval);
+    }
+    
+    popupUpdateInterval = setInterval(() => {
+      if (popupPort) {
+        sendStatusUpdateToPopup();
+      } else {
+        // Clear interval if popup disconnected
+        clearInterval(popupUpdateInterval);
+        popupUpdateInterval = null;
+      }
+    }, POPUP_STATUS_INTERVAL * 1000);
+    
+    // Handle popup disconnection
+    port.onDisconnect.addListener(() => {
+      console.log('Popup disconnected');
+      popupPort = null;
+      
+      // Clean up interval
+      if (popupUpdateInterval) {
+        clearInterval(popupUpdateInterval);
+        popupUpdateInterval = null;
+      }
     });
-    return true; // Required for async sendResponse
-  } 
-  else if (message.action === 'authenticationUpdated') {
-    console.log('Authentication updated, refreshing...');
-    // Re-initialize authService and re-check auth status
-    authService.initialize().then(() => checkAuthStatus());
-    return true;
+    
+    // Handle messages from popup
+    port.onMessage.addListener(handlePopupMessage);
+  }
+});
+
+/**
+ * Handle messages from the popup through port connection
+ * @param {Object} message - Message from popup
+ */
+function handlePopupMessage(message) {
+  console.log('Background received message from popup:', message);
+  
+  // Handle the message based on action
+  switch (message.action) {
+    case 'refreshMeetings':
+      pollCalendar();
+      break;
+      
+    case 'checkAuth':
+      checkAuthStatus();
+      break;
+      
+    case 'signIn':
+      signIn();
+      break;
+      
+    case 'signOut':
+      signOut();
+      break;
+  }
+}
+
+// Listen for messages from the popup or other parts of the extension
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  // Handle the message and send response
+  const respond = (success, data = {}) => {
+    if (chrome.runtime.lastError) {
+      console.debug('Error sending response:', chrome.runtime.lastError.message);
+      return;
+    }
+    
+    try {
+      sendResponse({ success, ...data });
+    } catch (error) {
+      console.debug('Failed to send response:', error.message);
+    }
+  };
+  
+  // Process message by action
+  try {
+    switch (message.action) {
+      case 'getStatusUpdate':
+        // Return current status data
+        authService.isAuthenticated().then(authenticated => {
+          respond(true, {
+            data: {
+              authenticated,
+              lastPollTime: lastPollTime ? lastPollTime.toISOString() : null,
+              lastError,
+              upcomingMeetings,
+              isPolling,
+              pollInterval: CALENDAR_POLLING_INTERVAL,
+              triggerThreshold: EVENT_TRIGGER_THRESHOLD
+            }
+          });
+        }).catch(error => {
+          console.error('Error checking auth for status update:', error);
+          respond(false, { error: error.message });
+        });
+        return true; // Keep channel open for async response
+        
+      case 'getUpcomingMeetings':
+        // Return meetings directly from storage to ensure freshness
+        chrome.storage.local.get('upcomingEvents', data => {
+          respond(true, { meetings: data.upcomingEvents || [] });
+        });
+        return true; // Required for async sendResponse
+        
+      case 'authenticationUpdated':
+        console.log('Authentication updated, refreshing...');
+        // Re-initialize authService and re-check auth status
+        authService.initialize().then(() => {
+          checkAuthStatus();
+          respond(true);
+        }).catch(error => {
+          console.error('Auth update error:', error);
+          respond(false, { error: error.message });
+        });
+        return true;
+        
+      case 'pollCalendar':
+        // Force a calendar poll now
+        pollCalendar().then(() => {
+          respond(true);
+        }).catch(error => {
+          console.error('Error polling calendar:', error);
+          respond(false, { error: error.message });
+        });
+        return true;
+        
+      case 'setReminder':
+        if (message.eventId && message.minutesBefore) {
+          setReminderForEvent(message.eventId, message.minutesBefore)
+            .then(() => respond(true))
+            .catch(error => respond(false, { error: error.message }));
+          return true;
+        }
+        respond(false, { error: 'Missing eventId or minutesBefore' });
+        return false;
+    }
+  } catch (error) {
+    console.error('Error processing message:', error);
+    respond(false, { error: error.message });
+    return false;
   }
 });

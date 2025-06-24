@@ -327,14 +327,262 @@ class UIController {
       
       // Update UI with meetings
       this._displayMeetings(meetings);
+      return true;
     } catch (error) {
       errorTracker.logError('Error refreshing meetings list', { error });
       this.elements.upcomingList.innerHTML = '<li class="error">Failed to load meetings</li>';
+      throw error;
     } finally {
       this.isLoading = false;
     }
   }
-  
+
+  /**
+   * Display meetings from an external source (like background script)
+   * @param {Array} meetings - Array of meeting objects
+   * @returns {Promise<boolean>} - Whether the operation succeeded
+   */
+  async displayMeetings(meetings) {
+    try {
+      // Update UI with meetings
+      this._displayMeetings(meetings);
+      return true;
+    } catch (error) {
+      errorTracker.logError('Error displaying provided meetings', { error });
+      this.elements.upcomingList.innerHTML = '<li class="error">Failed to display meetings</li>';
+      throw error;
+    }
+  }
+
+  /**
+   * Update the authentication status display
+   * @param {boolean} isAuthenticated - Whether the user is authenticated
+   */
+  updateAuthStatus(isAuthenticated) {
+    try {
+      if (isAuthenticated) {
+        if (this.elements.notSignedInSection) this.elements.notSignedInSection.style.display = 'none';
+        if (this.elements.signedInSection) this.elements.signedInSection.style.display = 'block';
+        if (this.elements.statusSection) this.elements.statusSection.classList.remove('hidden');
+        if (this.elements.statusText) this.elements.statusText.textContent = 'Active';
+        if (this.elements.statusIcon) this.elements.statusIcon.className = 'status-icon active';
+      } else {
+        if (this.elements.notSignedInSection) this.elements.notSignedInSection.style.display = 'block';
+        if (this.elements.signedInSection) this.elements.signedInSection.style.display = 'none';
+        if (this.elements.statusSection) this.elements.statusSection.classList.add('hidden');
+        if (this.elements.statusText) this.elements.statusText.textContent = 'Not signed in';
+        if (this.elements.statusIcon) this.elements.statusIcon.className = 'status-icon not-signed-in';
+      }
+      return true;
+    } catch (error) {
+      console.error('Error updating auth status display:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Update the user info display
+   * @param {Object} userInfo - User profile information
+   */
+  updateUserInfo(userInfo) {
+    try {
+      if (this.elements.userEmailSpan && userInfo && userInfo.email) {
+        this.elements.userEmailSpan.textContent = userInfo.email;
+      }
+      return true;
+    } catch (error) {
+      console.error('Error updating user info display:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Update the last poll time display
+   * @param {Date} lastPollTime - The time of the last calendar poll
+   */
+  updateLastPollTime(lastPollTime) {
+    try {
+      const statusFooter = document.getElementById('status-footer');
+      if (!statusFooter) return false;
+      
+      let lastPollSpan = document.getElementById('last-poll-time');
+      if (!lastPollSpan) {
+        lastPollSpan = document.createElement('span');
+        lastPollSpan.id = 'last-poll-time';
+        statusFooter.appendChild(lastPollSpan);
+      }
+      
+      if (lastPollTime) {
+        const timeStr = lastPollTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        lastPollSpan.textContent = `Last updated: ${timeStr}`;
+      } else {
+        lastPollSpan.textContent = 'Never updated';
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Error updating last poll time display:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Show polling error in the UI
+   * @param {string} errorMessage - Error message to display
+   */
+  showPollingError(errorMessage) {
+    try {
+      const errorDiv = document.getElementById('polling-error');
+      if (errorDiv) {
+        errorDiv.textContent = errorMessage;
+        errorDiv.classList.remove('hidden');
+      } else {
+        // Create error div if it doesn't exist
+        const newErrorDiv = document.createElement('div');
+        newErrorDiv.id = 'polling-error';
+        newErrorDiv.className = 'error-message';
+        newErrorDiv.textContent = errorMessage;
+        
+        // Insert after status section
+        if (this.elements.statusSection && this.elements.statusSection.parentNode) {
+          this.elements.statusSection.parentNode.insertBefore(
+            newErrorDiv, 
+            this.elements.statusSection.nextSibling
+          );
+        } else {
+          // Fallback: add to the end of the container
+          const container = document.querySelector('.container');
+          if (container) container.appendChild(newErrorDiv);
+        }
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Error showing polling error:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Clear polling error in the UI
+   */
+  clearPollingError() {
+    try {
+      const errorDiv = document.getElementById('polling-error');
+      if (errorDiv) {
+        errorDiv.classList.add('hidden');
+      }
+      return true;
+    } catch (error) {
+      console.error('Error clearing polling error:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Update the service status display
+   * @param {string} status - Current service status ('polling', 'idle', 'error')
+   */
+  updateServiceStatus(status) {
+    try {
+      if (!this.elements.statusIcon || !this.elements.statusText) return false;
+      
+      switch (status) {
+        case 'polling':
+          this.elements.statusIcon.className = 'status-icon polling';
+          this.elements.statusText.textContent = 'Polling for meetings...';
+          break;
+          
+        case 'idle':
+          this.elements.statusIcon.className = 'status-icon active';
+          this.elements.statusText.textContent = 'Active';
+          break;
+          
+        case 'error':
+          this.elements.statusIcon.className = 'status-icon error';
+          this.elements.statusText.textContent = 'Error';
+          break;
+          
+        default:
+          this.elements.statusIcon.className = 'status-icon active';
+          this.elements.statusText.textContent = 'Active';
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Error updating service status:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Update the polling interval display
+   * @param {number} interval - Polling interval in minutes
+   */
+  updatePollingInterval(interval) {
+    try {
+      // Create or update polling info in UI
+      let pollingInfo = document.getElementById('polling-info');
+      if (!pollingInfo) {
+        pollingInfo = document.createElement('div');
+        pollingInfo.id = 'polling-info';
+        pollingInfo.className = 'status-details';
+        
+        if (this.elements.statusSection) {
+          this.elements.statusSection.appendChild(pollingInfo);
+        }
+      }
+      
+      const intervalSpan = pollingInfo.querySelector('.polling-interval') || document.createElement('div');
+      intervalSpan.className = 'polling-interval';
+      intervalSpan.textContent = `Calendar checked every ${interval} minute${interval !== 1 ? 's' : ''}`;
+      
+      // Add to DOM if it's new
+      if (!intervalSpan.parentNode) {
+        pollingInfo.appendChild(intervalSpan);
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Error updating polling interval display:', error);
+      return false;
+    }
+  }
+
+  /**
+   * Update the trigger threshold display
+   * @param {number} threshold - Trigger threshold in minutes
+   */
+  updateTriggerThreshold(threshold) {
+    try {
+      // Create or update polling info in UI
+      let pollingInfo = document.getElementById('polling-info');
+      if (!pollingInfo) {
+        pollingInfo = document.createElement('div');
+        pollingInfo.id = 'polling-info';
+        pollingInfo.className = 'status-details';
+        
+        if (this.elements.statusSection) {
+          this.elements.statusSection.appendChild(pollingInfo);
+        }
+      }
+      
+      const thresholdSpan = pollingInfo.querySelector('.trigger-threshold') || document.createElement('div');
+      thresholdSpan.className = 'trigger-threshold';
+      thresholdSpan.textContent = `Notifications ${threshold} minute${threshold !== 1 ? 's' : ''} before meetings`;
+      
+      // Add to DOM if it's new
+      if (!thresholdSpan.parentNode) {
+        pollingInfo.appendChild(thresholdSpan);
+      }
+      
+      return true;
+    } catch (error) {
+      console.error('Error updating trigger threshold display:', error);
+      return false;
+    }
+  }
+
   /**
    * Handle the sign in button click
    */
@@ -638,20 +886,59 @@ class UIController {
     // Add each meeting to the list
     meetings.forEach(meeting => {
       const li = document.createElement('li');
+      li.classList.add('meeting-item');
       
       // Format start time
       const startTime = new Date(meeting.start);
       const timeStr = startTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
       
-      // Create meeting HTML
+      // Calculate time remaining until meeting
+      const now = new Date();
+      const minutesUntil = Math.round((startTime - now) / (1000 * 60));
+      let timeRemaining = '';
+      
+      if (minutesUntil <= 0) {
+        timeRemaining = '<span class="happening-now">Happening now</span>';
+      } else if (minutesUntil < 60) {
+        timeRemaining = `<span class="starting-soon">In ${minutesUntil} min${minutesUntil !== 1 ? 's' : ''}</span>`;
+      } else {
+        const hoursUntil = Math.floor(minutesUntil / 60);
+        const minsRemaining = minutesUntil % 60;
+        timeRemaining = `<span class="later-today">In ${hoursUntil} hr${hoursUntil !== 1 ? 's' : ''} ${minsRemaining > 0 ? `${minsRemaining} min` : ''}</span>`;
+      }
+      
+      // Format end time if available
+      let durationStr = '';
+      if (meeting.end) {
+        const endTime = new Date(meeting.end);
+        const durationMins = Math.round((endTime - startTime) / (1000 * 60));
+        if (durationMins < 60) {
+          durationStr = `(${durationMins} min${durationMins !== 1 ? 's' : ''})`;
+        } else {
+          const durationHrs = Math.floor(durationMins / 60);
+          const remainingMins = durationMins % 60;
+          durationStr = `(${durationHrs} hr${durationHrs !== 1 ? 's' : ''} ${remainingMins > 0 ? `${remainingMins} min` : ''})`;
+        }
+      }
+      
+      // Create meeting HTML with richer details
       li.innerHTML = `
-        <div class="meeting-time">${timeStr}</div>
+        <div class="meeting-time">
+          <div class="start-time">${timeStr}</div>
+          <div class="duration">${durationStr}</div>
+          <div class="time-remaining">${timeRemaining}</div>
+        </div>
         <div class="meeting-info">
           <div class="meeting-title">${meeting.title}</div>
           <div class="meeting-organizer">
             <span class="organizer-label">Organizer:</span>
             <span class="organizer-name">${meeting.organizer}</span>
           </div>
+          ${meeting.attendees && typeof meeting.attendees === 'number' ? 
+            `<div class="meeting-attendees">
+              <span class="attendees-count">${meeting.attendees} attendee${meeting.attendees !== 1 ? 's' : ''}</span>
+            </div>` : ''
+          }
         </div>
         <div class="meeting-actions">
           <a href="${meeting.meetLink}" target="_blank" class="join-button">Join</a>
@@ -661,6 +948,11 @@ class UIController {
       // Add to list
       this.elements.upcomingList.appendChild(li);
     });
+    
+    // Show the status section now that we have meetings
+    if (this.elements.statusSection) {
+      this.elements.statusSection.classList.remove('hidden');
+    }
   }
   
   /**

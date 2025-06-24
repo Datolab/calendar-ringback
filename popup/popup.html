@@ -25,13 +25,25 @@
     </div>
     
     <div id="status-section" class="section hidden">
-      <div class="status-indicator">
-        <span id="status-icon" class="icon"></span>
-        <span id="status-text">Calendar monitoring active</span>
+      <div class="status-header">
+        <div class="status-indicator">
+          <span id="status-icon" class="status-icon active"></span>
+          <span id="status-text">Calendar monitoring active</span>
+        </div>
+        <div id="polling-error" class="error-message hidden">Error message will appear here</div>
+      </div>
+      
+      <div id="polling-info" class="status-details">
+        <!-- Polling interval and trigger threshold will be added here -->
       </div>
       
       <div id="upcoming-section">
         <h2>Upcoming Meetings</h2>
+        <div class="refresh-control">
+          <button id="refresh-meetings" class="icon-button" title="Refresh meetings list">
+            <span class="refresh-icon">↻</span>
+          </button>
+        </div>
         <div id="upcoming-list">
           <!-- Upcoming meetings will be inserted here dynamically -->
           <p id="no-meetings" class="hidden">No upcoming meetings with Google Meet links.</p>
