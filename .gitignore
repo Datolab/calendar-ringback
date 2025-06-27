@@ -46,3 +46,6 @@ key.pem
 # Logs
 logs/
 *.log
+
+# Override global .png ignore for promo assets
+!assets/promo/*.png
