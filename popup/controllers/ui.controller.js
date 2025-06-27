@@ -654,11 +654,18 @@ class UIController {
       
       // Get values from form inputs and convert notification timing to seconds
       const notificationTimingMinutes = parseInt(this.elements.notificationTiming.value, 10);
+      console.log('💾 UI: Raw notification timing value from UI:', this.elements.notificationTiming.value, 'Parsed as minutes:', notificationTimingMinutes);
+      
       const settings = {
         notificationTiming: notificationTimingMinutes * 60, // Convert minutes to seconds
         autoJoin: this.elements.autoJoinCheckbox.checked,
         ringtone: this.elements.ringtoneSelect.value
       };
+      
+      console.log('💾 UI: Settings to be saved (in seconds):', {
+        ...settings,
+        notificationTimingInMinutes: settings.notificationTiming / 60
+      });
       
       console.log('💾 UI: Current form values -', {
         notificationTiming: {
@@ -950,21 +957,30 @@ class UIController {
       
       // Update notification timing
       if (this.elements.notificationTiming) {
+        // Define valid options for notification timing (in minutes)
+        const validMinutes = [0, 1, 3, 5, 10];
+        
         // Convert seconds to minutes for the UI (default to 5 minutes if not set)
-        const timingSeconds = settings.notificationTiming || 300; // Default to 5 minutes (300 seconds)
+        const timingSeconds = settings.notificationTiming ?? 300; // Default to 5 minutes (300 seconds) if null/undefined
         const timingMinutes = Math.round(timingSeconds / 60);
         
-        console.log('🔄 UI: Converting timing -', {
-          seconds: timingSeconds,
-          calculatedMinutes: timingMinutes,
-          validOptions: [1, 3, 5, 10]
+        console.log('🔄 UI: Processing notification timing -', {
+          rawSetting: settings.notificationTiming,
+          timingSeconds,
+          timingMinutes,
+          isZero: timingMinutes === 0 ? 'ZERO' : 'NON-ZERO',  // Highlight if zero
+          validOptions: validMinutes
         });
         
-        // Ensure the value is one of the valid options (1, 3, 5, 10)
-        const validMinutes = [1, 3, 5, 10];
-        const closestMatch = validMinutes.reduce((prev, curr) => 
+        // Ensure the value is one of the valid options (0, 1, 3, 5, 10)
+        let closestMatch = validMinutes.reduce((prev, curr) => 
           Math.abs(curr - timingMinutes) < Math.abs(prev - timingMinutes) ? curr : prev
         );
+        
+        // Special case: if timing is exactly 0, use 0 (don't round up to 1)
+        if (timingMinutes === 0) {
+          closestMatch = 0;
+        }
         
         console.log('🔄 UI: Setting notificationTiming select value to:', closestMatch);
         
