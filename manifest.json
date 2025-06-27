@@ -34,7 +34,7 @@
     "https://meet.google.com/*"
   ],
   "oauth2": {
-    "client_id": "723533017595-jibsk9snnl6hl79h7tke3h3aa1itf95r.apps.googleusercontent.com",
+    "client_id": "723533017595-d130o0h5hb695q3t3un5vlnn48nh51ma.apps.googleusercontent.com",
     "scopes": [
       "https://www.googleapis.com/auth/calendar.readonly",
       "https://www.googleapis.com/auth/userinfo.email"

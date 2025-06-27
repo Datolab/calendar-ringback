@@ -757,6 +757,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         }
         respond(false, { error: 'Missing eventId or minutesBefore' });
         return false;
+        
+      case 'needsTokenRefresh':
+        console.log('Received token refresh request from service worker at', new Date().toLocaleTimeString());
+        // This is sent by the alarm handler in service worker context
+        // We need to refresh the token from here (UI context) where chrome.identity works better
+        authService.refreshToken(true).then(token => {
+          console.log('Token refreshed successfully from UI context');
+          respond(true, { refreshed: true });
+          // Re-check auth status to update UI
+          checkAuthStatus();
+        }).catch(error => {
+          console.error('Failed to refresh token from UI context:', error);
+          respond(false, { error: error.message });
+        });
+        return true; // Keep channel open for async response
+        
+      case 'settingsUpdated':
+        console.log('Settings updated:', message.settings);
+        // Apply any setting changes that affect the background service
+        try {
+          // Store settings locally to ensure synchronization
+          chrome.storage.local.set({ userSettings: message.settings }, () => {
+            if (chrome.runtime.lastError) {
+              console.error('Error storing settings in background:', chrome.runtime.lastError);
+              respond(false, { error: chrome.runtime.lastError.message });
+            } else {
+              console.log('Settings synchronized in background script');
+              respond(true, { received: true });
+            }
+          });
+        } catch (error) {
+          console.error('Error processing settings update:', error);
+          respond(false, { error: error.message });
+        }
+        return true; // Keep channel open for async response
     }
   } catch (error) {
     console.error('Error processing message:', error);

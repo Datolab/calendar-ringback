@@ -45,44 +45,60 @@ class UIController {
   async initialize() {
     console.log('Initializing UI controller');
     
-    try {
-      // Step 1: Check for token right away - most direct way to determine auth status
-      let tokenExists = false;
-      try {
-        const token = await new Promise(resolve => {
-          chrome.storage.local.get('oauth_token', (result) => {
-            resolve(result && result.oauth_token);
-          });
-        });
-        tokenExists = !!token;
-        console.log('Token check:', tokenExists ? 'Token found' : 'No token found');
-      } catch (e) {
-        console.warn('Could not check for token:', e);
+    // Wait for DOM to be fully ready before proceeding
+    await new Promise(resolve => {
+      if (document.readyState === 'complete' || document.readyState === 'interactive') {
+        resolve();
+      } else {
+        document.addEventListener('DOMContentLoaded', resolve);
       }
-      
-      // Step 2: Cache DOM elements (this won't fail now with our changes)
+    });
+    
+    try {
+      // Step 1: Cache DOM elements
       this._cacheElements();
       console.log('DOM elements cached');
       
-      // Step 3: Set up event listeners
+      // Step 2: Set up event listeners
       this._setupEventListeners();
       console.log('Event listeners set up');
       
-      // Step 4: Display version
+      // Step 3: Display version
       this._displayVersion();
       
-      // Step 5: Force handle the welcome modal correctly based on token
-      const firstRunModal = document.getElementById('first-run-modal');
-      if (firstRunModal) {
-        if (tokenExists) {
-          console.log('Token exists - forcing welcome modal hidden');
-          firstRunModal.style.display = 'none';
-          firstRunModal.classList.add('hidden');
+      // Step 4: Check authentication status
+      try {
+        const isAuthenticated = await authService.isAuthenticated();
+        console.log('Auth status check:', isAuthenticated ? 'Authenticated' : 'Not authenticated');
+        
+        if (isAuthenticated) {
+          // Show signed-in UI
+          this.showSignedInUI();
           
-          // Also mark first run as complete
-          await settingsService.completeFirstRun();
+          // Load and display settings
+          try {
+            await this._loadAndDisplaySettings();
+          } catch (settingsError) {
+            console.error('Error loading settings:', settingsError);
+            errorTracker.logError('Failed to load settings', { error: settingsError });
+          }
+          
+          // Load meetings
+          this.refreshMeetingsList();
         } else {
-          // Only verify first-run status if we don't have a token
+          // Show sign-in UI
+          this.showSignedOutUI();
+        }
+      } catch (authError) {
+        console.error('Error checking authentication status:', authError);
+        errorTracker.logError('Auth check failed', { error: authError });
+        this.showSignedOutUI();
+      }
+      
+      // Handle first run modal
+      try {
+        const firstRunModal = document.getElementById('first-run-modal');
+        if (firstRunModal) {
           const isFirstRun = await settingsService.isFirstRun();
           if (isFirstRun) {
             console.log('First run - showing welcome modal');
@@ -93,41 +109,12 @@ class UIController {
             firstRunModal.style.display = 'none';
             firstRunModal.classList.add('hidden');
           }
+        } else {
+          console.warn('First run modal not found in DOM');
         }
-      } else {
-        console.warn('First run modal not found in DOM');
-      }
-      
-      // Step 6: Update UI based on authentication state
-      if (tokenExists) {
-        // User is authenticated - show signed in UI
-        try {
-          console.log('Showing signed-in UI');
-          const notSignedInSection = document.getElementById('not-signed-in');
-          const signedInSection = document.getElementById('signed-in');
-          
-          if (notSignedInSection) notSignedInSection.style.display = 'none';
-          if (signedInSection) signedInSection.style.display = 'block';
-          
-          // Load settings and meetings
-          await this._loadAndDisplaySettings();
-          await this._displayUserEmail();
-          await this.refreshMeetingsList();
-        } catch (err) {
-          console.error('Error updating UI for signed-in state:', err);
-        }
-      } else {
-        // User is not authenticated - show signed out UI
-        try {
-          console.log('Showing signed-out UI');
-          const notSignedInSection = document.getElementById('not-signed-in');
-          const signedInSection = document.getElementById('signed-in');
-          
-          if (notSignedInSection) notSignedInSection.style.display = 'block';
-          if (signedInSection) signedInSection.style.display = 'none';
-        } catch (err) {
-          console.error('Error updating UI for signed-out state:', err);
-        }
+      } catch (modalError) {
+        console.error('Error handling first run modal:', modalError);
+        errorTracker.logError('First run modal error', { error: modalError });
       }
       
       console.log('UI controller initialization complete');
@@ -141,7 +128,9 @@ class UIController {
         errorDiv.className = 'error-message';
         errorDiv.textContent = 'Initialization error. Please reload the extension.';
         document.body.appendChild(errorDiv);
-      } catch (e) {} // Suppress any further errors
+      } catch (e) {
+        console.error('Failed to show error message:', e);
+      }
       
       return false;
     }
@@ -161,13 +150,22 @@ class UIController {
    * Show the signed in UI state
    */
   async showSignedInUI() {
-    console.log('showSignedInUI called');
+    console.log('=== showSignedInUI ===');
     try {
-      // Check if we actually have the needed elements
-      console.log('Element check before showing signed-in UI:', { 
+      // Verify DOM elements are available
+      if (!this.elements) {
+        console.error('UI elements not initialized!');
+        this._cacheElements();
+      }
+      
+      // Log element states for debugging
+      console.log('UI element states:', { 
         notSignedInSection: !!this.elements.notSignedInSection,
         signedInSection: !!this.elements.signedInSection,
-        firstRunModal: !!this.elements.firstRunModal
+        firstRunModal: !!this.elements.firstRunModal,
+        notificationTiming: !!this.elements.notificationTiming,
+        autoJoinCheckbox: !!this.elements.autoJoinCheckbox,
+        ringtoneSelect: !!this.elements.ringtoneSelect
       });
       
       // Update UI visibility
@@ -205,14 +203,28 @@ class UIController {
         console.error('Modal not found via direct getElementById!');
       }
       
-      // Load settings
-      await this._loadAndDisplaySettings();
-      
-      // Display user email
-      await this._displayUserEmail();
-      
-      // Load and display upcoming meetings
-      await this.refreshMeetingsList();
+      try {
+        // Load and display user info
+        console.log('Loading user email...');
+        await this._displayUserEmail();
+        
+        // Load and display settings
+        console.log('Loading and displaying settings...');
+        await this._loadAndDisplaySettings();
+        
+        // Refresh meetings
+        console.log('Refreshing meetings...');
+        await this.refreshMeetingsList();
+        
+        console.log('✅ Successfully showed signed-in UI');
+      } catch (settingsError) {
+        console.error('Error loading user data:', settingsError);
+        errorTracker.logError('Failed to load user data', { 
+          error: settingsError.message || String(settingsError),
+          stack: settingsError.stack 
+        });
+        throw settingsError;
+      }
       
       console.log('Signed in UI shown successfully');
     } catch (error) {
@@ -335,6 +347,15 @@ class UIController {
     } finally {
       this.isLoading = false;
     }
+  }
+  
+  /**
+   * Display meetings in the UI (public method)
+   * @param {Array} meetings - Array of meeting objects
+   */
+  displayMeetings(meetings) {
+    // Simply pass to the internal implementation
+    this._displayMeetings(meetings);
   }
 
   /**
@@ -625,30 +646,77 @@ class UIController {
    * Handle the save settings button click
    */
   async handleSaveSettings() {
+    console.log('💾 UI: === START handleSaveSettings ===');
     try {
       // Show loading state
       this.elements.saveSettingsButton.disabled = true;
       this.elements.saveSettingsButton.textContent = 'Saving...';
       
-      // Get values from form inputs
+      // Get values from form inputs and convert notification timing to seconds
+      const notificationTimingMinutes = parseInt(this.elements.notificationTiming.value, 10);
       const settings = {
-        notificationTiming: parseInt(this.elements.notificationTiming.value, 10),
+        notificationTiming: notificationTimingMinutes * 60, // Convert minutes to seconds
         autoJoin: this.elements.autoJoinCheckbox.checked,
         ringtone: this.elements.ringtoneSelect.value
       };
       
-      // Save settings
-      await settingsService.saveSettings(settings);
+      console.log('💾 UI: Current form values -', {
+        notificationTiming: {
+          minutes: notificationTimingMinutes,
+          seconds: settings.notificationTiming,
+          elementValue: this.elements.notificationTiming.value
+        },
+        autoJoin: {
+          checked: this.elements.autoJoinCheckbox.checked,
+          elementValue: this.elements.autoJoinCheckbox.checked
+        },
+        ringtone: {
+          value: this.elements.ringtoneSelect.value,
+          elementValue: this.elements.ringtoneSelect.value
+        }
+      });
       
-      // Show success state
-      this.elements.saveSettingsButton.textContent = 'Saved!';
-      
-      // Reset button after a delay
-      setTimeout(() => {
-        this.elements.saveSettingsButton.disabled = false;
-        this.elements.saveSettingsButton.textContent = 'Save Settings';
-      }, 1500);
+      try {
+        console.log('💾 UI: Attempting to save settings...');
+        await settingsService.saveSettings(settings);
+        console.log('✅ UI: Settings saved successfully');
+        
+        // Verify the settings were saved correctly
+        console.log('🔍 UI: Verifying saved settings by loading them back...');
+        const verifiedSettings = await settingsService.loadSettings();
+        
+        console.log('🔍 UI: Verified settings from storage:', {
+          notificationTiming: verifiedSettings.notificationTiming,
+          autoJoin: verifiedSettings.autoJoin,
+          ringtone: verifiedSettings.ringtone,
+          firstRun: verifiedSettings.firstRun
+        });
+        
+        // Show success state
+        this.elements.saveSettingsButton.textContent = '✓ Saved';
+        console.log('✅ UI: Settings verification successful');
+        
+        // Force reload settings to UI
+        console.log('🔄 UI: Forcing UI to reload settings...');
+        await this._loadAndDisplaySettings();
+        
+        // Reset button after a delay
+        setTimeout(() => {
+          this.elements.saveSettingsButton.disabled = false;
+          this.elements.saveSettingsButton.textContent = 'Save Settings';
+        }, 1500);
+        
+      } catch (storageError) {
+        console.error('❌ UI: Error saving settings:', storageError);
+        errorTracker.logError('Save settings failed', { 
+          error: storageError.message || String(storageError),
+          stack: storageError.stack
+        });
+        this.elements.saveSettingsButton.textContent = 'Save Failed';
+        throw new Error(`Failed to save settings: ${storageError.message || 'Unknown error'}`);
+      }
     } catch (error) {
+      console.error('Failed to save settings:', error);
       errorTracker.logError('Failed to save settings', { error });
       this.elements.saveSettingsButton.disabled = false;
       this.elements.saveSettingsButton.textContent = 'Save Failed';
@@ -665,30 +733,68 @@ class UIController {
    */
   handleTestRingtone() {
     try {
-      // Stop any playing preview
-      this._stopRingtonePreview();
-      
+      // If we already have audio playing, just stop it and reset UI
+      if (this.previewAudio) {
+        this._stopRingtonePreview();
+        return;
+      }
+
       // Get selected ringtone
       const selectedRingtone = this.elements.ringtoneSelect.value;
       
-      // Create new audio element
-      this.previewAudio = new Audio(`../assets/audio/${selectedRingtone}-ring.mp3`);
+      // Update button text immediately to show loading state
+      this.elements.testSoundButton.textContent = 'Loading...';
       
-      // Set up event handler for when playback ends
+      // Create new audio element with preloading
+      this.previewAudio = new Audio();
+      
+      // Set up event handlers
+      this.previewAudio.addEventListener('canplaythrough', async () => {
+        try {
+          // Only play if we still have a reference (user hasn't cancelled)
+          if (this.previewAudio) {
+            // Wait briefly to ensure any previous audio operations are complete
+            await new Promise(resolve => setTimeout(resolve, 50));
+            
+            // Update button before playing
+            this.elements.testSoundButton.textContent = 'Stop';
+            
+            // Try playing with better error handling
+            try {
+              const playPromise = this.previewAudio.play();
+              if (playPromise !== undefined) {
+                playPromise.catch(e => {
+                  console.warn('Audio play promise rejected:', e);
+                });
+              }
+            } catch (playError) {
+              console.error('Error during audio play:', playError);
+            }
+          }
+        } catch (e) {
+          console.error('Error in canplaythrough handler:', e);
+        }
+      });
+      
       this.previewAudio.addEventListener('ended', () => {
         this._stopRingtonePreview();
       });
       
-      // Play the audio
-      this.previewAudio.play();
+      this.previewAudio.addEventListener('error', (e) => {
+        console.error('Audio error:', e);
+        this._stopRingtonePreview();
+      });
       
-      // Update button text
-      this.elements.testSoundButton.textContent = 'Stop';
+      // Set source after adding event listeners
+      this.previewAudio.src = `../assets/audio/${selectedRingtone}-ring.mp3`;
+      this.previewAudio.load(); // Start loading the audio
       
       // Change button function to stop playback
       this.elements.testSoundButton.onclick = () => this._stopRingtonePreview();
     } catch (error) {
+      console.error('Failed to play ringtone preview:', error);
       errorTracker.logError('Failed to play ringtone preview', { error });
+      this._stopRingtonePreview(); // Clean up on error
     }
   }
   
@@ -823,23 +929,119 @@ class UIController {
    * @private
    */
   async _loadAndDisplaySettings() {
+    console.log('🔄 UI: === _loadAndDisplaySettings ===');
     try {
+      // Ensure elements are cached
+      if (!this.elements.notificationTiming || !this.elements.autoJoinCheckbox || !this.elements.ringtoneSelect) {
+        console.log('🔄 UI: Re-caching elements before loading settings');
+        this._cacheElements();
+      }
+
       // Load settings
+      console.log('🔄 UI: Loading settings from storage...');
       const settings = await settingsService.loadSettings();
       
-      // Update form inputs
+      console.log('🔍 UI: Loaded settings from storage:', {
+        notificationTiming: settings.notificationTiming,
+        autoJoin: settings.autoJoin,
+        ringtone: settings.ringtone,
+        firstRun: settings.firstRun
+      });
+      
+      // Update notification timing
       if (this.elements.notificationTiming) {
-        this.elements.notificationTiming.value = settings.notificationTiming;
+        // Convert seconds to minutes for the UI (default to 5 minutes if not set)
+        const timingSeconds = settings.notificationTiming || 300; // Default to 5 minutes (300 seconds)
+        const timingMinutes = Math.round(timingSeconds / 60);
+        
+        console.log('🔄 UI: Converting timing -', {
+          seconds: timingSeconds,
+          calculatedMinutes: timingMinutes,
+          validOptions: [1, 3, 5, 10]
+        });
+        
+        // Ensure the value is one of the valid options (1, 3, 5, 10)
+        const validMinutes = [1, 3, 5, 10];
+        const closestMatch = validMinutes.reduce((prev, curr) => 
+          Math.abs(curr - timingMinutes) < Math.abs(prev - timingMinutes) ? curr : prev
+        );
+        
+        console.log('🔄 UI: Setting notificationTiming select value to:', closestMatch);
+        
+        // Store the current value to detect changes
+        const oldValue = this.elements.notificationTiming.value;
+        
+        // Update the select value
+        this.elements.notificationTiming.value = closestMatch.toString();
+        
+        // Force UI update if the value changed
+        if (this.elements.notificationTiming.value !== oldValue) {
+          this.elements.notificationTiming.dispatchEvent(new Event('change'));
+        }
+        
+        console.log('✅ UI: notificationTiming select value after set:', this.elements.notificationTiming.value, {
+          element: this.elements.notificationTiming,
+          selectedIndex: this.elements.notificationTiming.selectedIndex,
+          selectedText: this.elements.notificationTiming.options[this.elements.notificationTiming.selectedIndex]?.text
+        });
+      } else {
+        console.error('❌ UI: notificationTiming select element not found in DOM');
       }
       
+      // Update auto-join checkbox
       if (this.elements.autoJoinCheckbox) {
-        this.elements.autoJoinCheckbox.checked = settings.autoJoin;
+        const autoJoinValue = settings.autoJoin === true || settings.autoJoin === 'true' || settings.autoJoin === 1;
+        console.log('🔄 UI: Setting autoJoinCheckbox to:', autoJoinValue);
+        
+        // Store the current value to detect changes
+        const oldValue = this.elements.autoJoinCheckbox.checked;
+        
+        // Update the checkbox state
+        this.elements.autoJoinCheckbox.checked = autoJoinValue;
+        
+        // Force UI update if the value changed
+        if (this.elements.autoJoinCheckbox.checked !== oldValue) {
+          this.elements.autoJoinCheckbox.dispatchEvent(new Event('change'));
+        }
+        
+        console.log('✅ UI: autoJoinCheckbox after setting:', {
+          checked: this.elements.autoJoinCheckbox.checked,
+          value: this.elements.autoJoinCheckbox.value,
+          element: this.elements.autoJoinCheckbox
+        });
+      } else {
+        console.error('❌ UI: autoJoinCheckbox element not found in DOM');
       }
       
+      // Update ringtone select
       if (this.elements.ringtoneSelect) {
-        this.elements.ringtoneSelect.value = settings.ringtone;
+        const ringtoneValue = settings.ringtone || 'classic';
+        console.log('🔄 UI: Setting ringtoneSelect to:', ringtoneValue);
+        
+        // Store the current value to detect changes
+        const oldValue = this.elements.ringtoneSelect.value;
+        
+        // Update the select value
+        this.elements.ringtoneSelect.value = ringtoneValue;
+        
+        // Force UI update if the value changed
+        if (this.elements.ringtoneSelect.value !== oldValue) {
+          this.elements.ringtoneSelect.dispatchEvent(new Event('change'));
+        }
+        
+        console.log('✅ UI: ringtoneSelect after setting:', {
+          value: this.elements.ringtoneSelect.value,
+          selectedIndex: this.elements.ringtoneSelect.selectedIndex,
+          selectedText: this.elements.ringtoneSelect.options[this.elements.ringtoneSelect.selectedIndex]?.text,
+          element: this.elements.ringtoneSelect
+        });
+      } else {
+        console.error('❌ UI: ringtoneSelect element not found in DOM');
       }
+      
+      console.log('🔄 UI: Settings applied to UI elements');
     } catch (error) {
+      console.error('🔄 UI: Failed to load and display settings:', error);
       errorTracker.logError('Failed to load and display settings', { error });
     }
   }
