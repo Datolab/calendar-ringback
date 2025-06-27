@@ -5,12 +5,14 @@
 ### Store Listing
 
 #### Basic Information
+
 - **Extension Name**: Google Calendar Callback
-- **Summary** (up to 132 characters): 
+- **Summary** (up to 132 characters):
   Turn Google Calendar events with Meet links into phone-style incoming call notifications with ringtones.
 
 #### Detailed Description
-```
+
+```text
 Google Calendar Callback transforms your calendar experience by treating upcoming Google Meet events like incoming phone calls.
 
 FEATURES:
@@ -41,18 +43,21 @@ This extension is perfect for remote workers, virtual teams, students in online 
 ```
 
 #### Category
+
 - **Primary**: Productivity
 - **Secondary**: Business Tools
 
 ### Visual Assets
 
 #### Icons
+
 - Store Icon (128x128 PNG) - Already created in assets/icons/
 - Small Promo Tile (440x280 PNG) - Need to create
 - Large Promo Tile (920x680 PNG) - Need to create
 - Marquee Promo Tile (1400x560 PNG) - Optional
 
 #### Screenshots (1280x800 or 640x400)
+
 1. Main popup showing signed-in state
 2. Incoming call overlay with ringtone playing
 3. Settings screen showing ringtone options
@@ -61,7 +66,8 @@ This extension is perfect for remote workers, virtual teams, students in online 
 ### Privacy & Permissions
 
 #### Permissions Justification
-```
+
+```text
 This extension requests the following permissions:
 
 1. "identity" & "identity.email": Required to authenticate with Google Calendar API and display your email in the extension.
@@ -80,6 +86,7 @@ All data processing happens locally on your device. No personal data is sent to 
 ```
 
 #### Privacy Policy
+
 Create a privacy.html file explaining data handling practices.
 
 ## Store Listing Checklist

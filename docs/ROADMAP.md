@@ -57,21 +57,25 @@ The Minimum Viable Product (MVP) implementation focuses on core functionality:
 ## Success Metrics & Goals
 
 ### User Adoption
+
 - 5,000 active users within 3 months
 - 20,000 active users within 6 months
 - 100,000 active users within 12 months
 
 ### Free-to-Premium Conversion
+
 - 2% conversion rate initially
 - 5% conversion rate by month 6
 - 8% conversion rate by month 12
 
 ### User Engagement
+
 - 80% of users keep the extension installed after 1 week
 - 60% of users keep the extension installed after 1 month
 - 40% of users keep the extension installed after 3 months
 
 ### Revenue Targets
+
 - $5,000 MRR by month 6
 - $20,000 MRR by month 12
 - $100,000 MRR by month 24

@@ -104,7 +104,7 @@ The premium tier will enhance the experience with additional features:
 We will track the following key performance indicators:
 
 - **User Acquisition**: Weekly new installations
-- **Retention**: Weekly active users / Monthly active users 
+- **Retention**: Weekly active users / Monthly active users
 - **Conversion**: % of free users upgrading to premium
 - **Engagement**: Average feature usage per user
 - **Revenue**: Monthly recurring revenue (MRR) growth
