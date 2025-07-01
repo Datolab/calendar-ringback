@@ -49,23 +49,41 @@ class ErrorTracker {
   }
 
   /**
-   * Capture and store an error
-   * @param {Object} errorData - Information about the error
+   * Capture an error or exception
+   * @param {Error|string} error - The error to capture
+   * @param {object} extra - Additional context data
    */
-  captureError(errorData) {
-    // Add error to the collection
+  captureError(error, extra = {}) {
+    const errorData = {
+      timestamp: new Date().toISOString(),
+      message: error?.message || String(error),
+      stack: error?.stack,
+      extra: { ...extra }
+    };
+
+    // Add to local errors array
     this.errors.unshift(errorData);
-    
-    // Keep errors array under the maximum length
     if (this.errors.length > this.maxErrors) {
-      this.errors = this.errors.slice(0, this.maxErrors);
+      this.errors.length = this.maxErrors;
     }
+
+    // Always log to console in extension context
+    console.error('Error captured:', errorData);
     
-    // Store errors in chrome.storage
-    chrome.storage.local.set({ 'error_logs': this.errors });
+    // In a real app, you would send this to an error tracking service
+    // For now, we'll just log it to the console
+    console.error('Error:', errorData);
     
-    // Log to console for debugging
-    console.error('Calendar Callback Error:', errorData);
+    return errorData;
+  }
+  
+  /**
+   * Alias for captureError for compatibility with Sentry-like APIs
+   * @param {Error|string} error - The error to capture
+   * @param {object} extra - Additional context data
+   */
+  captureException(error, extra = {}) {
+    return this.captureError(error, extra);
   }
 
   /**

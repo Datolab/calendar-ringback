@@ -31,7 +31,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     // No need to call initialize() as it doesn't exist
     
     // Initialize the UI controller
-    await uiController.initialize();
+    await uiController.init();
     
     // Set up message listener for background script communications
     setupMessageListener();

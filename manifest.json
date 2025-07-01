@@ -20,6 +20,12 @@
     "service_worker": "background.js",
     "type": "module"
   },
+  "web_accessible_resources": [
+    {
+      "resources": ["popup/*"],
+      "matches": ["<all_urls>"]
+    }
+  ],
   "permissions": [
     "identity",
     "identity.email",
@@ -27,7 +33,8 @@
     "alarms",
     "notifications",
     "tabs",
-    "windows"
+    "windows",
+    "webRequest"
   ],
   "host_permissions": [
     "https://www.googleapis.com/*",

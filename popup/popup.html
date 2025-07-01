@@ -5,6 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Google Calendar Callback</title>
   <link rel="stylesheet" href="popup.css">
+  <script type="module" src="../register-sw.js"></script>
 </head>
 <body>
   <div class="container">
@@ -15,12 +16,12 @@
     <div id="auth-section" class="section">
       <div id="not-signed-in" class="hidden">
         <p>Sign in to connect with your Google Calendar.</p>
-        <button id="signin-button" class="primary-button">Sign In</button>
+        <button id="sign-in-button" class="primary-button">Sign In</button>
       </div>
       
       <div id="signed-in" class="hidden">
         <p>Signed in as: <span id="user-email">user@example.com</span></p>
-        <button id="signout-button" class="secondary-button">Sign Out</button>
+        <button id="sign-out-button" class="secondary-button">Sign Out</button>
       </div>
     </div>
     
@@ -34,7 +35,8 @@
       </div>
       
       <div id="polling-info" class="status-details">
-        <!-- Polling interval and trigger threshold will be added here -->
+        <div id="polling-interval">Checking for updates: Every 5 minutes</div>
+        <div id="trigger-threshold">Notification timing: 5 minutes before</div>
       </div>
       
       <div id="upcoming-section">
@@ -46,7 +48,7 @@
         </div>
         <div id="upcoming-list">
           <!-- Upcoming meetings will be inserted here dynamically -->
-          <p id="no-meetings" class="hidden">No upcoming meetings with Google Meet links.</p>
+          <p id="no-meetings-msg" class="hidden">No upcoming meetings with Google Meet links.</p>
         </div>
       </div>
     </div>
@@ -72,7 +74,7 @@
       
       <div class="setting-item">
         <label for="ringtone">Ringtone:</label>
-        <select id="ringtone">
+        <select id="ringtone-select">
           <option value="classic">Classic Phone</option>
           <option value="digital">Digital</option>
           <option value="old">Old Phone</option>
@@ -93,7 +95,7 @@
           <li>Allow calendar access permissions</li>
           <li>Keep this extension running in the background</li>
         </ol>
-        <button id="first-run-continue" class="primary-button">Get Started</button>
+        <button id="first-run-continue" class="primary-button" type="button">Get Started</button>
       </div>
     </div>
   </div>

@@ -7,6 +7,19 @@ import errorTracker from './utils/error-tracking.js';
 // Import the AuthService singleton for token management
 import authService from './popup/services/auth.service.js';
 
+// Service worker registration error handling
+if (typeof self !== 'undefined') {
+  self.addEventListener('error', (event) => {
+    console.error('Service Worker Error:', event.error || event.message || 'Unknown error');
+    errorTracker.captureException(event.error || new Error(event.message || 'Service Worker Error'));
+  });
+
+  self.addEventListener('unhandledrejection', (event) => {
+    console.error('Unhandled Promise Rejection in Service Worker:', event.reason);
+    errorTracker.captureException(event.reason || new Error('Unhandled Promise Rejection'));
+  });
+}
+
 // Error handling for service worker
 function logError(error, context = 'general') {
   console.error(`Calendar Callback Error [${context}]:`, error);
@@ -46,23 +59,79 @@ let isPolling = false;
 let popupUpdateInterval = null;
 let popupPort = null; // Connection port to popup
 
+// Maintain a single instance of auth state for the entire extension
+let authState = {
+  isAuthenticated: false,
+  userInfo: null,
+  token: null,
+  tokenExpiry: null
+};
+
+// Update the auth state and notify all connected ports
+async function updateAuthState(newState) {
+  authState = { ...authState, ...newState };
+  isAuthenticated = !!authState.token && authState.tokenExpiry > Date.now();
+  
+  // Save to storage for persistence
+  await chrome.storage.local.set({ 
+    auth_state: {
+      token: authState.token,
+      tokenExpiry: authState.tokenExpiry,
+      userInfo: authState.userInfo
+    }
+  });
+  
+  // Notify all connected ports
+  sendStatusUpdateToPopup();
+  return authState;
+}
+
+// Initialize auth state from storage
+async function initializeAuthState() {
+  try {
+    const data = await chrome.storage.local.get('auth_state');
+    if (data.auth_state) {
+      authState = {
+        token: data.auth_state.token || null,
+        tokenExpiry: data.auth_state.tokenExpiry || null,
+        userInfo: data.auth_state.userInfo || null,
+        isAuthenticated: !!(data.auth_state.token && 
+          data.auth_state.tokenExpiry > Date.now())
+      };
+      isAuthenticated = authState.isAuthenticated;
+    }
+    console.log('[Background] Initialized auth state:', authState);
+    return authState;
+  } catch (error) {
+    console.error('Error initializing auth state:', error);
+    errorTracker.captureException(error, { context: 'initialize_auth_state' });
+    return authState;
+  }
+}
+
 // Initialize the extension
 async function initialize() {
   console.log('Calendar Callback Extension: Initializing background service worker');
   
-  // Initialize auth service first
-  await authService.initialize();
-  
-  // Check for authentication status
-  await checkAuthStatus();
-  
-  // Set up alarm for regular polling
-  chrome.alarms.create(CALENDAR_ALARM_NAME, {
-    periodInMinutes: CALENDAR_POLLING_INTERVAL
-  });
-  
-  // Listen for alarm events
-  chrome.alarms.onAlarm.addListener(handleAlarm);
+  try {
+    // Initialize error tracking first
+    errorTracker.init();
+    
+    // Initialize auth state before anything else
+    await initializeAuthState();
+    
+    // Check for authentication status
+    await checkAuthStatus();
+    
+    // Set up the alarm for polling calendar
+    await setupPollingAlarm();
+    
+    console.log('Calendar Callback Extension: Initialization complete');
+  } catch (error) {
+    console.error('Error during initialization:', error);
+    errorTracker.captureException(error, { context: 'background_initialize' });
+    throw error;
+  }
 }
 
 // Check OAuth authentication status
@@ -70,18 +139,43 @@ async function checkAuthStatus(interactive = false) {
   try {
     console.log(`Checking auth status (interactive: ${interactive})`);
     
-    // Use authService to check authentication status
-    isAuthenticated = await authService.isAuthenticated();
+    // First check our local auth state
+    const currentState = await initializeAuthState();
+    
+    // If we have a valid token, we're authenticated
+    if (currentState.token && currentState.tokenExpiry > Date.now()) {
+      isAuthenticated = true;
+      return isAuthenticated;
+    }
     
     // If not authenticated and interactive mode is allowed, try interactive auth
-    if (!isAuthenticated && interactive) {
+    if (interactive) {
       console.log('Not authenticated, trying interactive authentication...');
       try {
+        // Use authService for the actual authentication flow
         await authService.signIn();
-        isAuthenticated = await authService.isAuthenticated();
+        
+        // Update our local auth state with the new token
+        const token = await authService.getToken();
+        const userInfo = await authService.getUserInfo();
+        
+        await updateAuthState({
+          token: token,
+          tokenExpiry: Date.now() + (60 * 60 * 1000), // 1 hour from now
+          userInfo: userInfo,
+          isAuthenticated: true
+        });
+        
+        isAuthenticated = true;
       } catch (authError) {
         console.error('Interactive authentication failed:', authError);
         isAuthenticated = false;
+        await updateAuthState({
+          token: null,
+          tokenExpiry: null,
+          userInfo: null,
+          isAuthenticated: false
+        });
       }
     }
     
@@ -271,10 +365,31 @@ async function fetchUpcomingEvents() {
         if (response.status === 401) {
           console.log('Token expired (401), attempting to refresh...');
           // Use AuthService to refresh the token
-          await authService.refreshToken();
-          
-          // Retry the fetch with new token
-          return fetchUpcomingEvents();
+          try {
+            const newToken = await authService.refreshToken();
+            if (!newToken) {
+              throw new Error('Failed to refresh token');
+            }
+            
+            // Update the token in the headers and retry the request
+            console.log('Retrying with new token...');
+            const retryResponse = await fetch(url, {
+              headers: {
+                'Authorization': `Bearer ${newToken}`
+              }
+            });
+            
+            if (!retryResponse.ok) {
+              throw new Error(`Calendar API error after token refresh: ${retryResponse.status} - ${await retryResponse.text()}`);
+            }
+            
+            // Use the successful response
+            return retryResponse.json();
+          } catch (refreshError) {
+            console.error('Failed to refresh token:', refreshError);
+            await authService.signOut(); // Clear invalid auth state
+            throw new Error('Session expired. Please sign in again.');
+          }
         }
         
         throw new Error(`Calendar API error: ${response.status} - ${await response.text()}`);
@@ -610,6 +725,67 @@ chrome.runtime.onInstalled.addListener(details => {
 // Initialize on startup
 chrome.runtime.onStartup.addListener(initialize);
 
+/**
+ * Set up the polling alarm for calendar updates
+ */
+async function setupPollingAlarm() {
+  try {
+    // Clear any existing alarms to prevent duplicates
+    await chrome.alarms.clear(CALENDAR_ALARM_NAME);
+    
+    // Create a new alarm for polling
+    await chrome.alarms.create(CALENDAR_ALARM_NAME, {
+      periodInMinutes: CALENDAR_POLLING_INTERVAL
+    });
+    
+    console.log(`Calendar polling alarm set to run every ${CALENDAR_POLLING_INTERVAL} minutes`);
+  } catch (error) {
+    console.error('Failed to set up polling alarm:', error);
+    errorTracker.captureException(error, { context: 'setup_polling_alarm' });
+    throw error;
+  }
+}
+
+/**
+ * Poll the calendar for upcoming events
+ * This is called both by the polling alarm and when manually refreshing from the popup
+ */
+async function pollCalendar() {
+  try {
+    console.log('Polling calendar for updates...');
+    
+    // Check if we're already polling to prevent duplicate requests
+    if (isPolling) {
+      console.log('Calendar polling already in progress, skipping this request');
+      return;
+    }
+    
+    isPolling = true;
+    
+    // Fetch upcoming events
+    await fetchUpcomingEvents();
+    
+    // Update last poll time
+    lastPollTime = new Date();
+    
+    // Send updated status to popup if open
+    sendStatusUpdateToPopup();
+    
+  } catch (error) {
+    console.error('Error polling calendar:', error);
+    lastError = error.message;
+    
+    // Send error to popup if open
+    sendStatusUpdateToPopup();
+    
+  } finally {
+    isPolling = false;
+  }
+}
+
+// Listen for alarm events
+chrome.alarms.onAlarm.addListener(handleAlarm);
+
 // Set up connection management for popup
 chrome.runtime.onConnect.addListener(port => {
   if (port.name === 'popup') {
@@ -685,15 +861,26 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   // Handle the message and send response
   const respond = (success, data = {}) => {
     if (chrome.runtime.lastError) {
-      console.debug('Error sending response:', chrome.runtime.lastError.message);
+      console.error('Error sending response:', chrome.runtime.lastError);
       return;
     }
     
-    try {
-      sendResponse({ success, ...data });
-    } catch (error) {
-      console.debug('Failed to send response:', error.message);
+    const response = {
+      success,
+      ...data,
+      timestamp: new Date().toISOString()
+    };
+    
+    // Add auth state to all responses if not explicitly set
+    if (!data.authState) {
+      response.authState = {
+        isAuthenticated: authState.isAuthenticated,
+        userInfo: authState.userInfo,
+        hasToken: !!authState.token
+      };
     }
+    
+    sendResponse(response);
   };
   
   // Process message by action
@@ -725,6 +912,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           respond(true, { meetings: data.upcomingEvents || [] });
         });
         return true; // Required for async sendResponse
+        
+      case 'getAuthStatus':
+        // Return the current auth state
+        respond(true, { 
+          isAuthenticated: authState.isAuthenticated,
+          userInfo: authState.userInfo,
+          hasToken: !!authState.token
+        });
+        break;
         
       case 'authenticationUpdated':
         console.log('Authentication updated, refreshing...');
@@ -771,6 +967,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           console.error('Failed to refresh token from UI context:', error);
           respond(false, { error: error.message });
         });
+        return true; // Keep channel open for async response
+        
+      case 'refreshMeetings':
+        console.log('Received refreshMeetings request');
+        // Trigger a calendar poll and respond when complete
+        pollCalendar()
+          .then(() => {
+            respond(true, { success: true });
+          })
+          .catch(error => {
+            console.error('Error refreshing meetings:', error);
+            respond(false, { 
+              error: error.message || 'Failed to refresh meetings',
+              details: error.toString()
+            });
+          });
+        return true; // Keep channel open for async response
+        
+      case 'signIn':
+        console.log('Received signIn request');
+        // Handle sign in through authService
+        authService.signIn()
+          .then(({ token, userInfo }) => {
+            console.log('Sign in successful, updating auth state');
+            // Update the auth state with the new token and user info
+            updateAuthState({
+              isAuthenticated: true,
+              userInfo,
+              token
+            });
+            
+            // Send success response
+            respond(true, { 
+              success: true, 
+              userInfo,
+              token: token // Include token in response for debugging
+            });
+            
+            console.log('Auth state updated, sending status update to popup');
+            // Trigger a status update to refresh the UI
+            setTimeout(() => {
+              sendStatusUpdateToPopup();
+            }, 100);
+            
+            return true;
+          })
+          .catch(error => {
+            console.error('Sign in failed:', error);
+            // Update auth state to reflect sign out on failure
+            updateAuthState({
+              isAuthenticated: false,
+              userInfo: null,
+              token: null
+            });
+            
+            respond(false, { 
+              error: error.message || 'Authentication failed',
+              details: error.toString()
+            });
+            
+            return false;
+          });
         return true; // Keep channel open for async response
         
       case 'settingsUpdated':

@@ -29,7 +29,8 @@ class UIController {
       saveSettingsButton: null,
       firstRunModal: null,
       firstRunContinue: null,
-      versionSpan: null
+      versionSpan: null,
+      pollingError: null
     };
     
     // Audio for ringtone preview
@@ -37,102 +38,646 @@ class UIController {
     
     // UI state
     this.isLoading = false;
+    this._hasCompletedFirstRun = false;
+    
+    // Bind methods
+    this.init = this.init.bind(this);
+    this.showSignedInUI = this.showSignedInUI.bind(this);
+    this.showSignedOutUI = this.showSignedOutUI.bind(this);
+    this.handleSignIn = this.handleSignIn.bind(this);
+    this._handleFirstRunContinue = this._handleFirstRunContinue.bind(this);
   }
   
   /**
    * Initialize the UI controller
    */
-  async initialize() {
-    console.log('Initializing UI controller');
-    
-    // Wait for DOM to be fully ready before proceeding
-    await new Promise(resolve => {
-      if (document.readyState === 'complete' || document.readyState === 'interactive') {
-        resolve();
-      } else {
-        document.addEventListener('DOMContentLoaded', resolve);
+  /**
+   * Cache DOM elements for better performance
+   */
+  cacheElements() {
+    // Helper function to safely get elements
+    const getElement = (id) => {
+      const el = document.getElementById(id);
+      if (!el) {
+        console.warn(`Element with id '${id}' not found`);
       }
-    });
+      return el;
+    };
+
+    try {
+      // Main sections
+      this.elements.notSignedInSection = getElement('not-signed-in');
+      this.elements.signedInSection = getElement('signed-in');
+      this.elements.statusSection = getElement('status-section');
+      
+      // User info
+      this.elements.userEmailSpan = getElement('user-email');
+      
+      // Buttons
+      this.elements.signInButton = getElement('sign-in-button');
+      this.elements.signOutButton = getElement('sign-out-button');
+      this.elements.saveSettingsButton = getElement('save-settings');
+      this.elements.testSoundButton = getElement('test-sound');
+      
+      // Status elements
+      this.elements.statusIcon = getElement('status-icon');
+      this.elements.statusText = getElement('status-text');
+      
+      // Meeting list
+      this.elements.upcomingList = getElement('upcoming-list');
+      this.elements.noMeetingsMsg = getElement('no-meetings-msg');
+      
+      // Settings
+      this.elements.notificationTiming = getElement('notification-timing');
+      this.elements.autoJoinCheckbox = getElement('auto-join');
+      this.elements.ringtoneSelect = getElement('ringtone-select');
+      
+      // First run modal
+      this.elements.firstRunModal = getElement('first-run-modal');
+      this.elements.firstRunContinue = getElement('first-run-continue');
+      
+      // Version
+      this.elements.versionSpan = getElement('version');
+      
+      console.log('DOM elements cached successfully');
+    } catch (error) {
+      console.error('Error caching DOM elements:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Show error message to the user
+   * @param {string} message - Error message to display
+   */
+  _showErrorUI(message) {
+    console.error('Showing error UI:', message);
+    try {
+      // Show error in status area if available
+      if (this.elements.statusText) {
+        this.elements.statusText.textContent = message;
+        this.elements.statusText.className = 'error';
+      }
+      
+      // Ensure error is visible
+      if (this.elements.statusSection) {
+        this.elements.statusSection.style.display = 'block';
+      }
+      
+      // Also log to console
+      console.error('UI Error:', message);
+    } catch (error) {
+      console.error('Failed to show error UI:', error);
+    }
+  }
+
+  /**
+   * Check if this is the first run of the extension
+   * @private
+   */
+  async _checkFirstRun() {
+    try {
+      const result = await new Promise((resolve) => {
+        chrome.storage.local.get(['hasCompletedFirstRun'], (result) => {
+          if (chrome.runtime.lastError) {
+            console.error('Error checking first run status:', chrome.runtime.lastError);
+            resolve(false);
+          } else {
+            resolve(!!result?.hasCompletedFirstRun);
+          }
+        });
+      });
+      
+      this._hasCompletedFirstRun = result;
+      return !result; // Return true if first run
+    } catch (error) {
+      console.error('Error in _checkFirstRun:', error);
+      return false; // Default to not first run on error
+    }
+  }
+
+  /**
+   * Handle the first run continue button click
+   * @private
+   */
+  async _handleFirstRunContinue() {
+    console.log('Starting first run continue handler...');
+    try {
+      // Show loading state
+      const continueButton = this.elements.firstRunContinue;
+      if (!continueButton) {
+        console.error('Continue button not found');
+        this._showErrorUI('UI Error: Could not find continue button');
+        return false;
+      }
+      
+      const originalText = continueButton.textContent;
+      continueButton.disabled = true;
+      continueButton.textContent = 'Continuing...';
+      
+      try {
+        // Save first run status
+        await new Promise((resolve, reject) => {
+          chrome.storage.local.set({ hasCompletedFirstRun: true }, () => {
+            if (chrome.runtime.lastError) {
+              reject(new Error(`Failed to save first run status: ${chrome.runtime.lastError.message}`));
+            } else {
+              console.log('First run status saved successfully');
+              resolve();
+            }
+          });
+        });
+        
+        // Update UI state
+        console.log('Hiding onboarding modal and showing sign-in UI...');
+        this._hideOnboardingModal();
+        
+        // Ensure we're showing the signed out UI with sign-in button
+        this.showSignedOutUI();
+        
+        console.log('First run flow completed successfully');
+        return true;
+      } catch (error) {
+        console.error('Error completing first run:', error);
+        throw error; // Re-throw to be caught by outer catch
+      } finally {
+        // Always restore button state
+        continueButton.disabled = false;
+        continueButton.textContent = originalText;
+      }
+    } catch (error) {
+      console.error('Error in _handleFirstRunContinue:', error);
+      this._showErrorUI('An error occurred. Please try again.');
+      return false;
+    }
+  }
+
+  /**
+   * Update the service status display in the UI
+   * @param {Object} status - The service status object
+   * @param {boolean} status.isActive - Whether the service is active
+   * @param {string} [status.message] - Optional status message
+   */
+  updateServiceStatus({ isActive, message }) {
+    try {
+      console.log(`Updating service status: isActive=${isActive}, message=${message || 'No message'}`);
+      
+      if (!this.elements.statusIcon || !this.elements.statusText) {
+        console.warn('Status elements not found');
+        return;
+      }
+      
+      // Update status icon
+      this.elements.statusIcon.className = `status-icon ${isActive ? 'active' : 'inactive'}`;
+      
+      // Update status text
+      if (message) {
+        this.elements.statusText.textContent = message;
+      } else {
+        this.elements.statusText.textContent = isActive ? 'Calendar monitoring active' : 'Calendar monitoring paused';
+      }
+      
+      // Show/hide status section
+      if (this.elements.statusSection) {
+        this.elements.statusSection.style.display = 'block';
+      }
+      
+    } catch (error) {
+      console.error('Error updating service status:', error);
+    }
+  }
+  
+  /**
+   * Update the trigger threshold display in the UI
+   * @param {number} minutes - The trigger threshold in minutes
+   */
+  updateTriggerThreshold(minutes) {
+    try {
+      console.log(`Updating trigger threshold display to ${minutes} minutes`);
+      
+      // Try to find the element in this order:
+      // 1. Cached element
+      // 2. Direct DOM lookup
+      // 3. Create it if needed
+      let thresholdElement = this.elements?.triggerThreshold || 
+                           document.getElementById('trigger-threshold');
+      
+      // If still not found, try to create it
+      if (!thresholdElement) {
+        console.log('Trigger threshold element not found in cache or DOM, attempting to create it...');
+        
+        // Find or create the polling info container
+        let pollingInfo = document.querySelector('#polling-info');
+        if (!pollingInfo) {
+          const statusSection = document.getElementById('status-section');
+          if (statusSection) {
+            pollingInfo = document.createElement('div');
+            pollingInfo.id = 'polling-info';
+            pollingInfo.className = 'status-details';
+            statusSection.appendChild(pollingInfo);
+          }
+        }
+        
+        if (pollingInfo) {
+          // Create the threshold element
+          thresholdElement = document.createElement('div');
+          thresholdElement.id = 'trigger-threshold';
+          thresholdElement.className = 'status-detail';
+          pollingInfo.appendChild(thresholdElement);
+          
+          // Cache the element for future use
+          if (!this.elements) this.elements = {};
+          this.elements.triggerThreshold = thresholdElement;
+          
+          console.log('Created missing trigger threshold element');
+        } else {
+          console.warn('Could not find or create polling info container for trigger threshold');
+          return; // Can't proceed without a parent element
+        }
+      }
+      
+      // Update the trigger threshold text
+      let thresholdText = 'Notification timing: ';
+      if (minutes <= 0) {
+        thresholdText += 'At start time';
+      } else if (minutes === 1) {
+        thresholdText += '1 minute before';
+      } else {
+        thresholdText += `${minutes} minutes before`;
+      }
+      
+      thresholdElement.textContent = thresholdText;
+      
+    } catch (error) {
+      console.error('Error updating trigger threshold display:', error);
+    }
+  }
+  
+  /**
+   * Update the polling interval display in the UI
+   * @param {number} minutes - The polling interval in minutes
+   */
+  updatePollingInterval(minutes) {
+    try {
+      console.log(`Updating polling interval display to ${minutes} minutes`);
+      
+      // Find the polling info element
+      const pollingInfo = this.elements.statusSection?.querySelector('#polling-info');
+      if (!pollingInfo) {
+        console.warn('Polling info element not found');
+        return;
+      }
+      
+      // Update the polling interval text
+      let intervalText = 'Checking for updates: ';
+      if (minutes <= 0) {
+        intervalText += 'Disabled';
+      } else if (minutes === 1) {
+        intervalText += 'Every minute';
+      } else {
+        intervalText += `Every ${minutes} minutes`;
+      }
+      
+      pollingInfo.textContent = intervalText;
+      
+    } catch (error) {
+      console.error('Error updating polling interval display:', error);
+    }
+  }
+  
+  /**
+   * Display meetings in the UI
+   * @param {Array} meetings - Array of meeting objects to display
+   */
+  displayMeetings(meetings) {
+    try {
+      console.log('Displaying meetings:', meetings);
+      
+      // Get the meetings list container and no meetings message elements
+      const meetingsList = this.elements.upcomingList;
+      const noMeetingsMsg = this.elements.noMeetingsMsg;
+      
+      if (!meetingsList || !noMeetingsMsg) {
+        console.error('Required DOM elements not found for displaying meetings');
+        return;
+      }
+      
+      // Clear existing meetings
+      meetingsList.innerHTML = '';
+      
+      if (!meetings || !Array.isArray(meetings) || meetings.length === 0) {
+        // No meetings to display
+        noMeetingsMsg.classList.remove('hidden');
+        return;
+      }
+      
+      // Hide the no meetings message
+      noMeetingsMsg.classList.add('hidden');
+      
+      // Sort meetings by start time (soonest first)
+      const now = new Date();
+      const sortedMeetings = [...meetings].sort((a, b) => 
+        new Date(a.startTime) - new Date(b.startTime)
+      );
+      
+      // Create and append meeting elements
+      sortedMeetings.forEach(meeting => {
+        if (!meeting || !meeting.summary) return;
+        
+        const meetingElement = document.createElement('div');
+        meetingElement.className = 'meeting-item';
+        
+        // Format meeting time
+        const startTime = new Date(meeting.startTime);
+        const timeString = startTime.toLocaleTimeString([], { 
+          hour: '2-digit', 
+          minute: '2-digit',
+          hour12: true 
+        });
+        
+        // Create meeting HTML
+        meetingElement.innerHTML = `
+          <div class="meeting-time">${timeString}</div>
+          <div class="meeting-details">
+            <div class="meeting-title">${meeting.summary || 'No title'}</div>
+            ${meeting.location ? `<div class="meeting-location">${meeting.location}</div>` : ''}
+          </div>
+          ${meeting.hangoutLink ? `
+            <a href="${meeting.hangoutLink}" target="_blank" class="join-button" title="Join meeting">
+              Join
+            </a>
+          ` : ''}
+        `;
+        
+        meetingsList.appendChild(meetingElement);
+      });
+      
+      console.log(`Displayed ${sortedMeetings.length} meetings`);
+      
+    } catch (error) {
+      console.error('Error displaying meetings:', error);
+      this._showErrorUI('Failed to load meetings');
+    }
+  }
+  
+  /**
+   * Clear any polling error messages
+   */
+  clearPollingError() {
+    try {
+      if (this.elements.pollingError) {
+        this.elements.pollingError.classList.add('hidden');
+      }
+    } catch (error) {
+      console.error('Error clearing polling error:', error);
+    }
+  }
+
+  /**
+   * Hide the onboarding modal and show the main UI
+   * @private
+   */
+  _hideOnboardingModal() {
+    console.log('Hiding onboarding modal...');
+    
+    // Function to completely remove the modal from the DOM
+    const removeModal = (modal) => {
+      if (modal && modal.parentNode) {
+        console.log('Removing modal from DOM');
+        modal.parentNode.removeChild(modal);
+        return true;
+      }
+      return false;
+    };
+    
+    // Try to remove the modal from the DOM first (most reliable way to hide it)
+    let modalRemoved = false;
+    if (this.elements.firstRunModal) {
+      modalRemoved = removeModal(this.elements.firstRunModal);
+    } else {
+      console.warn('firstRunModal element not found in cache, searching in DOM');
+      const modal = document.getElementById('first-run-modal');
+      if (modal) {
+        modalRemoved = removeModal(modal);
+      } else {
+        console.warn('Could not find first-run-modal in DOM');
+      }
+    }
+    
+    // If we couldn't remove it, try to hide it with CSS as fallback
+    if (!modalRemoved && this.elements.firstRunModal) {
+      console.log('Fallback: Hiding modal with CSS');
+      const modal = this.elements.firstRunModal;
+      modal.style.display = 'none';
+      modal.style.visibility = 'hidden';
+      modal.style.opacity = '0';
+      modal.style.pointerEvents = 'none';
+      modal.setAttribute('aria-hidden', 'true');
+    }
+    
+    // Show the main UI sections
+    const showElement = (element) => {
+      if (element) {
+        element.classList.remove('hidden');
+        element.style.display = '';
+        element.style.visibility = '';
+        element.style.opacity = '';
+        element.setAttribute('aria-hidden', 'false');
+      }
+    };
+    
+    // Show all main UI sections
+    [this.elements.statusSection, this.elements.signedInSection, this.elements.authSection].forEach(showElement);
+    
+    // Force a reflow to ensure styles are applied
+    if (document.body) {
+      void document.body.offsetHeight;
+    }
+    
+    console.log('Onboarding modal hidden and main UI shown');
+  }
+
+  /**
+   * Show the first run UI
+   * @private
+   */
+  _showFirstRunUI() {
+    if (this.elements.firstRunModal) {
+      this.elements.firstRunModal.classList.remove('hidden');
+    }
+  }
+
+  /**
+   * Set up event listeners for UI elements
+   */
+  setupEventListeners() {
+    console.log('Setting up event listeners...');
     
     try {
-      // Step 1: Cache DOM elements
-      this._cacheElements();
-      console.log('DOM elements cached');
+      // Sign In Button
+      if (this.elements.signInButton) {
+        this.elements.signInButton.addEventListener('click', () => this.handleSignIn());
+      }
       
-      // Step 2: Set up event listeners
-      this._setupEventListeners();
-      console.log('Event listeners set up');
+      // Sign Out Button
+      if (this.elements.signOutButton) {
+        this.elements.signOutButton.addEventListener('click', () => this.handleSignOut());
+      }
       
-      // Step 3: Display version
-      this._displayVersion();
+      // Save Settings Button
+      if (this.elements.saveSettingsButton) {
+        this.elements.saveSettingsButton.addEventListener('click', () => this.handleSaveSettings());
+      }
       
-      // Step 4: Check authentication status
-      try {
-        const isAuthenticated = await authService.isAuthenticated();
-        console.log('Auth status check:', isAuthenticated ? 'Authenticated' : 'Not authenticated');
+      // Test Sound Button
+      if (this.elements.testSoundButton) {
+        this.elements.testSoundButton.addEventListener('click', () => this.handleTestRingtone());
+      }
+      
+      // First Run Continue Button - Use a bound method for better context handling
+      if (this.elements.firstRunContinue) {
+        console.log('Setting up first run continue button listener');
+        // Remove any existing click listeners first
+        const newButton = this.elements.firstRunContinue.cloneNode(true);
+        this.elements.firstRunContinue.parentNode.replaceChild(newButton, this.elements.firstRunContinue);
+        this.elements.firstRunContinue = newButton;
         
-        if (isAuthenticated) {
-          // Show signed-in UI
-          this.showSignedInUI();
+        // Add the click handler
+        this.elements.firstRunContinue.addEventListener('click', async (e) => {
+          console.log('First run continue button clicked');
+          e.preventDefault();
+          e.stopPropagation();
           
-          // Load and display settings
           try {
-            await this._loadAndDisplaySettings();
-          } catch (settingsError) {
-            console.error('Error loading settings:', settingsError);
-            errorTracker.logError('Failed to load settings', { error: settingsError });
+            await this.handleFirstRunContinue();
+          } catch (error) {
+            console.error('Error in first run continue handler:', error);
+            this._showErrorUI('Failed to continue. Please try again.');
+            
+            // Re-enable the button if there was an error
+            if (this.elements.firstRunContinue) {
+              this.elements.firstRunContinue.disabled = false;
+              this.elements.firstRunContinue.textContent = 'Get Started';
+            }
           }
-          
-          // Load meetings
-          this.refreshMeetingsList();
-        } else {
-          // Show sign-in UI
-          this.showSignedOutUI();
+        });
+      } else {
+        console.warn('First run continue button not found in DOM');
+      }
+      
+      console.log('Event listeners set up successfully');
+    } catch (error) {
+      console.error('Error setting up event listeners:', error);
+      this._showErrorUI('Failed to set up event listeners');
+    }
+  }
+
+  /**
+   * Update authentication status in the UI
+   * @param {Object} status - Authentication status object
+   * @param {boolean} status.isAuthenticated - Whether the user is authenticated
+   * @param {string} [status.userEmail] - User's email if authenticated
+   * @param {string} [status.error] - Error message if authentication failed
+   */
+  updateAuthStatus(status) {
+    console.log('Updating auth status in UI:', status);
+    
+    try {
+      if (status.isAuthenticated) {
+        // Show signed in state
+        if (this.elements.signedInSection) {
+          this.elements.signedInSection.style.display = 'block';
         }
-      } catch (authError) {
-        console.error('Error checking authentication status:', authError);
-        errorTracker.logError('Auth check failed', { error: authError });
+        if (this.elements.notSignedInSection) {
+          this.elements.notSignedInSection.style.display = 'none';
+        }
+        
+        // Update user email if provided
+        if (status.userEmail && this.elements.userEmailSpan) {
+          this.elements.userEmailSpan.textContent = status.userEmail;
+        }
+        
+        // Update status indicator
+        if (this.elements.statusIcon) {
+          this.elements.statusIcon.className = 'status-icon signed-in';
+        }
+        if (this.elements.statusText) {
+          this.elements.statusText.textContent = 'Signed in';
+          this.elements.statusText.className = 'success';
+        }
+        
+        // Load meetings if we have a list element
+        if (this.elements.upcomingList) {
+          this._loadAndDisplayMeetings();
+        }
+      } else {
+        // Show signed out state
+        if (this.elements.signedInSection) {
+          this.elements.signedInSection.style.display = 'none';
+        }
+        if (this.elements.notSignedInSection) {
+          this.elements.notSignedInSection.style.display = 'block';
+        }
+        
+        // Update status indicator
+        if (this.elements.statusIcon) {
+          this.elements.statusIcon.className = 'status-icon not-signed-in';
+        }
+        if (this.elements.statusText) {
+          this.elements.statusText.textContent = 'Not signed in';
+          this.elements.statusText.className = '';
+        }
+        
+        // Show error if present
+        if (status.error) {
+          this._showErrorUI(status.error);
+        }
+      }
+    } catch (error) {
+      console.error('Error updating auth status UI:', error);
+      this._showErrorUI('Error updating UI');
+    }
+  }
+
+  /**
+   * Initialize the UI controller
+   */
+  async init() {
+    console.log('=== UI CONTROLLER INITIALIZATION STARTED ===');
+    
+    try {
+      // Cache DOM elements
+      console.log('Caching DOM elements...');
+      this.cacheElements();
+      
+      // Set up event listeners
+      console.log('Setting up event listeners...');
+      this.setupEventListeners();
+      
+      // Check authentication status with the background script
+      const authStatus = await this._checkAuthStatus();
+      
+      // Check first run status
+      const firstRun = await this._checkFirstRun();
+      
+      // Initial UI state
+      if (firstRun) {
+        console.log('First run detected, showing welcome screen');
+        this._showFirstRunUI();
+      } else if (authStatus.isAuthenticated) {
+        console.log('User is authenticated, showing main UI');
+        this._hideOnboardingModal();
+        await this.showSignedInUI();
+      } else {
+        console.log('User is not authenticated, showing sign-in UI');
+        this._hideOnboardingModal();
         this.showSignedOutUI();
       }
       
-      // Handle first run modal
-      try {
-        const firstRunModal = document.getElementById('first-run-modal');
-        if (firstRunModal) {
-          const isFirstRun = await settingsService.isFirstRun();
-          if (isFirstRun) {
-            console.log('First run - showing welcome modal');
-            firstRunModal.style.display = 'block';
-            firstRunModal.classList.remove('hidden');
-          } else {
-            console.log('Not first run - hiding welcome modal');
-            firstRunModal.style.display = 'none';
-            firstRunModal.classList.add('hidden');
-          }
-        } else {
-          console.warn('First run modal not found in DOM');
-        }
-      } catch (modalError) {
-        console.error('Error handling first run modal:', modalError);
-        errorTracker.logError('First run modal error', { error: modalError });
-      }
-      
-      console.log('UI controller initialization complete');
-      return true;
-      
+      console.log('=== UI CONTROLLER INITIALIZATION COMPLETE ===');
     } catch (error) {
-      console.error('Fatal error in UI initialization:', error);
-      try {
-        // Last-resort error handling - try to show something useful
-        const errorDiv = document.createElement('div');
-        errorDiv.className = 'error-message';
-        errorDiv.textContent = 'Initialization error. Please reload the extension.';
-        document.body.appendChild(errorDiv);
-      } catch (e) {
-        console.error('Failed to show error message:', e);
-      }
-      
-      return false;
+      console.error('Error initializing UI controller:', error);
+      this._showErrorUI('Failed to initialize the extension. Please try refreshing the page.');
     }
   }
   
@@ -140,97 +685,216 @@ class UIController {
    * Show the signed out UI state
    */
   showSignedOutUI() {
-    this.elements.notSignedInSection.style.display = 'block';
-    this.elements.signedInSection.style.display = 'none';
-    this.elements.statusText.textContent = 'Not signed in';
-    this.elements.statusIcon.className = 'status-icon not-signed-in';
+    console.log('Showing signed out UI...');
+    
+    // Ensure elements are cached
+    if (!this.elements.notSignedInSection || !this.elements.signedInSection) {
+      console.warn('UI elements not properly initialized, re-caching...');
+      this._cacheElements();
+    }
+    
+    // Show not signed in section and hide signed in section
+    if (this.elements.notSignedInSection) {
+      this.elements.notSignedInSection.classList.remove('hidden');
+    }
+    
+    if (this.elements.signedInSection) {
+      this.elements.signedInSection.classList.add('hidden');
+    }
+    
+    // Update status if elements exist
+    if (this.elements.statusText) {
+      this.elements.statusText.textContent = 'Not signed in';
+    }
+    
+    if (this.elements.statusIcon) {
+      this.elements.statusIcon.className = 'status-icon not-signed-in';
+    }
+    
+    console.log('Signed out UI shown');
   }
   
+  /**
+   * Update the user email in the UI
+   * @param {string} email - The user's email address
+   * @private
+   */
+  _updateUserEmail(email) {
+    if (!email) return;
+    
+    // Find the email display element if it exists
+    const emailElement = this.elements.userEmailSpan || document.getElementById('user-email');
+    
+    if (emailElement) {
+      emailElement.textContent = email;
+      // Make sure the element is visible
+      emailElement.style.display = 'inline';
+    } else {
+      console.warn('User email element not found in the DOM');
+    }
+  }
+  
+  /**
+   * Helper to show an element
+   * @param {HTMLElement} element - The element to show
+   * @private
+   */
+  _showElement(element) {
+    if (element) {
+      element.style.display = 'block';
+    }
+  }
+
+  /**
+   * Helper to hide an element
+   * @param {HTMLElement} element - The element to hide
+   * @private
+   */
+  _hideElement(element) {
+    if (element) {
+      element.style.display = 'none';
+    }
+  }
+
   /**
    * Show the signed in UI state
    */
   async showSignedInUI() {
-    console.log('=== showSignedInUI ===');
+    console.log('=== SHOW SIGNED IN UI ===');
+    
     try {
-      // Verify DOM elements are available
-      if (!this.elements) {
-        console.error('UI elements not initialized!');
-        this._cacheElements();
+      // Check authentication status with background script
+      const authStatus = await this._checkAuthStatus();
+      
+      if (!authStatus.isAuthenticated) {
+        console.log('User is not authenticated, showing sign-in UI');
+        this.showSignedOutUI();
+        return;
       }
       
-      // Log element states for debugging
-      console.log('UI element states:', { 
-        notSignedInSection: !!this.elements.notSignedInSection,
-        signedInSection: !!this.elements.signedInSection,
-        firstRunModal: !!this.elements.firstRunModal,
-        notificationTiming: !!this.elements.notificationTiming,
-        autoJoinCheckbox: !!this.elements.autoJoinCheckbox,
-        ringtoneSelect: !!this.elements.ringtoneSelect
-      });
+      // Update UI for authenticated user
+      console.log('Updating UI for authenticated user...');
       
-      // Update UI visibility
-      if (this.elements.notSignedInSection) {
-        console.log('Hiding not-signed-in section');
-        this.elements.notSignedInSection.style.display = 'none';
+      // Display user email if available
+      if (authStatus.userInfo && authStatus.userInfo.email) {
+        console.log('Displaying user email:', authStatus.userInfo.email);
+        this._updateUserEmail(authStatus.userInfo.email);
       } else {
-        console.error('notSignedInSection element not found!');
+        // Fallback to loading from auth service if not in auth status
+        console.log('Loading user email from auth service...');
+        await this._displayUserEmail();
       }
       
+      // Show the signed-in section and hide the not-signed-in section
       if (this.elements.signedInSection) {
-        console.log('Showing signed-in section');
         this.elements.signedInSection.style.display = 'block';
-      } else {
-        console.error('signedInSection element not found!');
+        this.elements.signedInSection.classList.remove('hidden');
       }
       
+      if (this.elements.notSignedInSection) {
+        this.elements.notSignedInSection.style.display = 'none';
+        this.elements.notSignedInSection.classList.add('hidden');
+      }
+      
+      // Show the status section
+      if (this.elements.statusSection) {
+        this.elements.statusSection.style.display = 'block';
+        this.elements.statusSection.classList.remove('hidden');
+      }
+      
+      // Update status to show authenticated
       if (this.elements.statusText) {
-        this.elements.statusText.textContent = 'Active';
+        this.elements.statusText.textContent = 'Ready';
       }
       
       if (this.elements.statusIcon) {
         this.elements.statusIcon.className = 'status-icon active';
       }
       
-      console.log('Hiding first run modal from showSignedInUI');
-      this.hideOnboardingModal();
+      // Load settings
+      console.log('Loading settings...');
+      await this._loadAndDisplaySettings();
       
-      // Force hide the modal with direct DOM access as a failsafe
-      const directModalElement = document.getElementById('first-run-modal');
-      if (directModalElement) {
-        console.log('Directly hiding modal via getElementById');
-        directModalElement.style.display = 'none';
-      } else {
-        console.error('Modal not found via direct getElementById!');
-      }
+      // Refresh meetings list
+      console.log('Refreshing meetings list...');
+      await this.refreshMeetingsList();
       
-      try {
-        // Load and display user info
-        console.log('Loading user email...');
-        await this._displayUserEmail();
-        
-        // Load and display settings
-        console.log('Loading and displaying settings...');
-        await this._loadAndDisplaySettings();
-        
-        // Refresh meetings
-        console.log('Refreshing meetings...');
-        await this.refreshMeetingsList();
-        
-        console.log('✅ Successfully showed signed-in UI');
-      } catch (settingsError) {
-        console.error('Error loading user data:', settingsError);
-        errorTracker.logError('Failed to load user data', { 
-          error: settingsError.message || String(settingsError),
-          stack: settingsError.stack 
-        });
-        throw settingsError;
-      }
-      
-      console.log('Signed in UI shown successfully');
+      console.log('✅ Successfully showed signed-in UI');
     } catch (error) {
-      console.error('Error in showSignedInUI:', error);
-      errorTracker.logError('Error showing signed in UI', { error });
-      this.showErrorState('Error loading user data');
+      console.error('Error showing signed-in UI:', error);
+      this._showErrorUI('Failed to load your calendar. Please try refreshing the page.');
+    }
+  }
+  
+  /**
+   * Refresh the meetings list from the background script
+   * @private
+   */
+  async refreshMeetingsList() {
+    console.log('Refreshing meetings list...');
+    
+    try {
+      // Show loading state
+      this._showElement(this.loadingView);
+      
+      console.log('Sending refreshMeetings message to background script...');
+      
+      // Request a refresh from the background script
+      const response = await chrome.runtime.sendMessage({ 
+        action: 'refreshMeetings' 
+      }).catch(error => {
+        console.error('Error sending refreshMeetings message:', error);
+        throw error;
+      });
+      
+      console.log('Received response from background script:', response);
+      
+      if (!response) {
+        console.error('No response received from background script');
+        throw new Error('No response from background script');
+      }
+      
+      if (response.success) {
+        console.log('Meetings refreshed successfully');
+        // The background script will send a status update with the new meetings
+      } else {
+        const errorMessage = response.error || 'Unknown error';
+        console.error('Failed to refresh meetings:', errorMessage);
+        console.error('Error details:', response.errorDetails);
+        
+        if (response.error === 'auth_error') {
+          this._showErrorUI('Authentication error. Please sign in again.');
+        } else if (response.error === 'api_error') {
+          this._showErrorUI('Error connecting to Google Calendar. Please try again later.');
+        } else {
+          this._showErrorUI('Failed to refresh meetings. Please try again.');
+        }
+      }
+    } catch (error) {
+      console.error('Error in refreshMeetingsList:', error);
+      console.error('Error details:', {
+        name: error.name,
+        message: error.message,
+        stack: error.stack,
+        chromeError: chrome.runtime.lastError
+      });
+      
+      let errorMessage = 'Error refreshing meetings. ';
+      
+      if (chrome.runtime.lastError) {
+        errorMessage += `[${chrome.runtime.lastError.message}]`;
+      } else if (error.message) {
+        errorMessage += error.message;
+      }
+      
+      this._showErrorUI(errorMessage);
+    } finally {
+      // Hide loading state
+      if (this._hideElement) {
+        this._hideElement(this.loadingView);
+      } else {
+        console.error('_hideElement method is not available');
+      }
     }
   }
   
@@ -238,10 +902,16 @@ class UIController {
    * Show the authenticating UI state
    */
   showAuthenticatingUI() {
-    this.elements.notSignedInSection.style.display = 'block';
-    this.elements.signedInSection.style.display = 'none';
-    this.elements.statusText.textContent = 'Authenticating...';
-    this.elements.statusIcon.className = 'status-icon loading';
+    if (this.elements.notSignedInSection) this.elements.notSignedInSection.style.display = 'block';
+    if (this.elements.signedInSection) this.elements.signedInSection.style.display = 'none';
+    
+    if (this.elements.statusText) {
+      this.elements.statusText.textContent = 'Authenticating...';
+    }
+    
+    if (this.elements.statusIcon) {
+      this.elements.statusIcon.className = 'status-icon loading';
+    }
     
     // Disable sign-in button and update text
     if (this.elements.signInButton) {
@@ -257,375 +927,123 @@ class UIController {
   }
   
   /**
-   * Show an error state in the UI
+   * Alias for showAuthenticatingUI for backward compatibility
+   * @private
+   */
+  _showAuthenticatingUI() {
+    this.showAuthenticatingUI();
+  }
+  
+  /**
+   * Show sign in error message
+   * @param {string} message - Error message to display
+   * @private
+   */
+  _showSignInError(message) {
+    console.error('Sign in error:', message);
+    this._showErrorUI(message);
+  }
+  
+  /**
+   * Show error state in the UI
    * @param {string} message - Error message to display
    */
   showErrorState(message) {
-    // Add null checks for all element accesses
-    if (this.elements.statusText) {
-      this.elements.statusText.textContent = message || 'Error';
-    } else {
-      console.error('Status text element not found');
-    }
-    
-    if (this.elements.statusIcon) {
-      this.elements.statusIcon.className = 'status-icon error';
-    }
-    
-    // Re-enable buttons
-    if (this.elements.signInButton) {
-      this.elements.signInButton.disabled = false;
-      this.elements.signInButton.textContent = 'Sign In';
-    }
-    
-    if (this.elements.firstRunContinue) {
-      this.elements.firstRunContinue.disabled = false;
-      this.elements.firstRunContinue.textContent = 'Get Started';
-    }
-    
-    // Log error to console for debugging
-    console.error(`UI Error: ${message}`, {
-      elementsFound: {
-        statusText: !!this.elements.statusText,
-        statusIcon: !!this.elements.statusIcon,
-        signInButton: !!this.elements.signInButton,
-        firstRunContinue: !!this.elements.firstRunContinue
+    this._showErrorUI(message);
+  }
+  
+  /**
+   * Handle the sign in button click
+   */
+  // Check authentication status with background script
+  async _checkAuthStatus() {
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({ action: 'getAuthStatus' }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error('Error checking auth status:', chrome.runtime.lastError);
+            resolve({ isAuthenticated: false, userInfo: null });
+            return;
+          }
+          
+          if (response && response.success) {
+            console.log('Auth status from background:', response);
+            resolve({
+              isAuthenticated: response.isAuthenticated || false,
+              userInfo: response.userInfo || null
+            });
+          } else {
+            console.error('Failed to get auth status:', response && response.error);
+            resolve({ isAuthenticated: false, userInfo: null });
+          }
+        });
+      } catch (error) {
+        console.error('Error in _checkAuthStatus:', error);
+        resolve({ isAuthenticated: false, userInfo: null });
       }
     });
   }
   
-  /**
-   * Show the onboarding modal
-   */
-  showOnboardingModal() {
-    if (this.elements.firstRunModal) {
-      this.elements.firstRunModal.style.display = 'block';
-    }
-  }
-  
-  /**
-   * Hide the onboarding modal
-   */
-  hideOnboardingModal() {
-    console.log('Hiding onboarding modal');
-    if (this.elements.firstRunModal) {
-      console.log('Found firstRunModal element, hiding it');
-      this.elements.firstRunModal.style.display = 'none';
-      
-      // Force a reflow to ensure the display change takes effect
-      void this.elements.firstRunModal.offsetHeight;
-      
-      // Verify the modal is hidden
-      console.log('Modal display style after hiding:', 
-        window.getComputedStyle(this.elements.firstRunModal).display);
-    } else {
-      console.error('firstRunModal element not found when trying to hide it');
-      console.log('Available elements:', Object.keys(this.elements));
-    }
-  }
-  
-  /**
-   * Refresh the meetings list
-   */
-  async refreshMeetingsList() {
-    try {
-      this.isLoading = true;
-      
-      // Show loading state
-      this.elements.upcomingList.innerHTML = '<li class="loading">Loading meetings...</li>';
-      
-      // Load upcoming meetings
-      const meetings = await meetingsService.loadUpcomingMeetings();
-      
-      // Update UI with meetings
-      this._displayMeetings(meetings);
-      return true;
-    } catch (error) {
-      errorTracker.logError('Error refreshing meetings list', { error });
-      this.elements.upcomingList.innerHTML = '<li class="error">Failed to load meetings</li>';
-      throw error;
-    } finally {
-      this.isLoading = false;
-    }
-  }
-  
-  /**
-   * Display meetings in the UI (public method)
-   * @param {Array} meetings - Array of meeting objects
-   */
-  displayMeetings(meetings) {
-    // Simply pass to the internal implementation
-    this._displayMeetings(meetings);
-  }
-
-  /**
-   * Display meetings from an external source (like background script)
-   * @param {Array} meetings - Array of meeting objects
-   * @returns {Promise<boolean>} - Whether the operation succeeded
-   */
-  async displayMeetings(meetings) {
-    try {
-      // Update UI with meetings
-      this._displayMeetings(meetings);
-      return true;
-    } catch (error) {
-      errorTracker.logError('Error displaying provided meetings', { error });
-      this.elements.upcomingList.innerHTML = '<li class="error">Failed to display meetings</li>';
-      throw error;
-    }
-  }
-
-  /**
-   * Update the authentication status display
-   * @param {boolean} isAuthenticated - Whether the user is authenticated
-   */
-  updateAuthStatus(isAuthenticated) {
-    try {
-      if (isAuthenticated) {
-        if (this.elements.notSignedInSection) this.elements.notSignedInSection.style.display = 'none';
-        if (this.elements.signedInSection) this.elements.signedInSection.style.display = 'block';
-        if (this.elements.statusSection) this.elements.statusSection.classList.remove('hidden');
-        if (this.elements.statusText) this.elements.statusText.textContent = 'Active';
-        if (this.elements.statusIcon) this.elements.statusIcon.className = 'status-icon active';
-      } else {
-        if (this.elements.notSignedInSection) this.elements.notSignedInSection.style.display = 'block';
-        if (this.elements.signedInSection) this.elements.signedInSection.style.display = 'none';
-        if (this.elements.statusSection) this.elements.statusSection.classList.add('hidden');
-        if (this.elements.statusText) this.elements.statusText.textContent = 'Not signed in';
-        if (this.elements.statusIcon) this.elements.statusIcon.className = 'status-icon not-signed-in';
-      }
-      return true;
-    } catch (error) {
-      console.error('Error updating auth status display:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Update the user info display
-   * @param {Object} userInfo - User profile information
-   */
-  updateUserInfo(userInfo) {
-    try {
-      if (this.elements.userEmailSpan && userInfo && userInfo.email) {
-        this.elements.userEmailSpan.textContent = userInfo.email;
-      }
-      return true;
-    } catch (error) {
-      console.error('Error updating user info display:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Update the last poll time display
-   * @param {Date} lastPollTime - The time of the last calendar poll
-   */
-  updateLastPollTime(lastPollTime) {
-    try {
-      const statusFooter = document.getElementById('status-footer');
-      if (!statusFooter) return false;
-      
-      let lastPollSpan = document.getElementById('last-poll-time');
-      if (!lastPollSpan) {
-        lastPollSpan = document.createElement('span');
-        lastPollSpan.id = 'last-poll-time';
-        statusFooter.appendChild(lastPollSpan);
-      }
-      
-      if (lastPollTime) {
-        const timeStr = lastPollTime.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
-        lastPollSpan.textContent = `Last updated: ${timeStr}`;
-      } else {
-        lastPollSpan.textContent = 'Never updated';
-      }
-      
-      return true;
-    } catch (error) {
-      console.error('Error updating last poll time display:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Show polling error in the UI
-   * @param {string} errorMessage - Error message to display
-   */
-  showPollingError(errorMessage) {
-    try {
-      const errorDiv = document.getElementById('polling-error');
-      if (errorDiv) {
-        errorDiv.textContent = errorMessage;
-        errorDiv.classList.remove('hidden');
-      } else {
-        // Create error div if it doesn't exist
-        const newErrorDiv = document.createElement('div');
-        newErrorDiv.id = 'polling-error';
-        newErrorDiv.className = 'error-message';
-        newErrorDiv.textContent = errorMessage;
-        
-        // Insert after status section
-        if (this.elements.statusSection && this.elements.statusSection.parentNode) {
-          this.elements.statusSection.parentNode.insertBefore(
-            newErrorDiv, 
-            this.elements.statusSection.nextSibling
-          );
-        } else {
-          // Fallback: add to the end of the container
-          const container = document.querySelector('.container');
-          if (container) container.appendChild(newErrorDiv);
-        }
-      }
-      
-      return true;
-    } catch (error) {
-      console.error('Error showing polling error:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Clear polling error in the UI
-   */
-  clearPollingError() {
-    try {
-      const errorDiv = document.getElementById('polling-error');
-      if (errorDiv) {
-        errorDiv.classList.add('hidden');
-      }
-      return true;
-    } catch (error) {
-      console.error('Error clearing polling error:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Update the service status display
-   * @param {string} status - Current service status ('polling', 'idle', 'error')
-   */
-  updateServiceStatus(status) {
-    try {
-      if (!this.elements.statusIcon || !this.elements.statusText) return false;
-      
-      switch (status) {
-        case 'polling':
-          this.elements.statusIcon.className = 'status-icon polling';
-          this.elements.statusText.textContent = 'Polling for meetings...';
-          break;
-          
-        case 'idle':
-          this.elements.statusIcon.className = 'status-icon active';
-          this.elements.statusText.textContent = 'Active';
-          break;
-          
-        case 'error':
-          this.elements.statusIcon.className = 'status-icon error';
-          this.elements.statusText.textContent = 'Error';
-          break;
-          
-        default:
-          this.elements.statusIcon.className = 'status-icon active';
-          this.elements.statusText.textContent = 'Active';
-      }
-      
-      return true;
-    } catch (error) {
-      console.error('Error updating service status:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Update the polling interval display
-   * @param {number} interval - Polling interval in minutes
-   */
-  updatePollingInterval(interval) {
-    try {
-      // Create or update polling info in UI
-      let pollingInfo = document.getElementById('polling-info');
-      if (!pollingInfo) {
-        pollingInfo = document.createElement('div');
-        pollingInfo.id = 'polling-info';
-        pollingInfo.className = 'status-details';
-        
-        if (this.elements.statusSection) {
-          this.elements.statusSection.appendChild(pollingInfo);
-        }
-      }
-      
-      const intervalSpan = pollingInfo.querySelector('.polling-interval') || document.createElement('div');
-      intervalSpan.className = 'polling-interval';
-      intervalSpan.textContent = `Calendar checked every ${interval} minute${interval !== 1 ? 's' : ''}`;
-      
-      // Add to DOM if it's new
-      if (!intervalSpan.parentNode) {
-        pollingInfo.appendChild(intervalSpan);
-      }
-      
-      return true;
-    } catch (error) {
-      console.error('Error updating polling interval display:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Update the trigger threshold display
-   * @param {number} threshold - Trigger threshold in minutes
-   */
-  updateTriggerThreshold(threshold) {
-    try {
-      // Create or update polling info in UI
-      let pollingInfo = document.getElementById('polling-info');
-      if (!pollingInfo) {
-        pollingInfo = document.createElement('div');
-        pollingInfo.id = 'polling-info';
-        pollingInfo.className = 'status-details';
-        
-        if (this.elements.statusSection) {
-          this.elements.statusSection.appendChild(pollingInfo);
-        }
-      }
-      
-      const thresholdSpan = pollingInfo.querySelector('.trigger-threshold') || document.createElement('div');
-      thresholdSpan.className = 'trigger-threshold';
-      thresholdSpan.textContent = `Notifications ${threshold} minute${threshold !== 1 ? 's' : ''} before meetings`;
-      
-      // Add to DOM if it's new
-      if (!thresholdSpan.parentNode) {
-        pollingInfo.appendChild(thresholdSpan);
-      }
-      
-      return true;
-    } catch (error) {
-      console.error('Error updating trigger threshold display:', error);
-      return false;
-    }
-  }
-
-  /**
-   * Handle the sign in button click
-   */
+  // Handle sign in
   async handleSignIn() {
+    console.log('=== HANDLE SIGN IN ===');
+    
     try {
-      // Update UI
-      this.showAuthenticatingUI();
+      // Show authenticating state
+      this._showAuthenticatingUI();
       
-      // Attempt to sign in
-      await authService.signIn();
+      // Start the sign in process through the background script
+      console.log('Starting sign in process...');
       
-      // Update UI
-      await this.showSignedInUI();
+      const result = await new Promise((resolve) => {
+        chrome.runtime.sendMessage({ action: 'signIn' }, (response) => {
+          if (chrome.runtime.lastError) {
+            console.error('Error during sign in:', chrome.runtime.lastError);
+            resolve({ 
+              success: false, 
+              error: chrome.runtime.lastError.message || 'Unknown error during sign in' 
+            });
+            return;
+          }
+          resolve(response || { success: false, error: 'No response from background script' });
+        });
+      });
       
-      // Mark first run complete if this is the first run
-      const isFirstRun = await settingsService.isFirstRun();
-      if (isFirstRun) {
-        await settingsService.completeFirstRun();
+      if (result && result.success) {
+        console.log('Sign in successful, showing signed-in UI...');
+        await this.showSignedInUI();
+        console.log('Sign in flow completed successfully');
+      } else {
+        const errorMessage = result?.error?.message || result?.error || 'Unknown error during sign in';
+        throw new Error(errorMessage);
       }
     } catch (error) {
-      errorTracker.logError('Sign in failed', { error });
-      this.showErrorState('Authentication failed');
+      console.error('❌ Sign in failed:', error);
+      
+      // Log the error
+      errorTracker.captureException(error, { 
+        context: 'sign_in',
+        isAuthenticated: false
+      });
+      
+      // Show appropriate error message
+      let errorMessage = 'Authentication failed';
+      if (error.message.includes('popup_closed_by_user')) {
+        errorMessage = 'Sign in was canceled';
+      } else if (error.message.includes('access_denied')) {
+        errorMessage = 'Access was denied';
+      } else if (error.message.includes('No response from background script')) {
+        errorMessage = 'Failed to connect to the extension. Please try again.';
+      }
+      
+      this._showSignInError(errorMessage);
+      this.showSignedOutUI();
+      
+      // Fall back to sign-out state
+      this.showSignedOutUI();
+      
+    } finally {
+      this.isSigningIn = false;
     }
   }
   
@@ -809,35 +1227,82 @@ class UIController {
    * Handle the first run continue/get started button click
    */
   async handleFirstRunContinue() {
+    console.log('=== HANDLE FIRST RUN CONTINUE ===');
+    
+    // Prevent multiple clicks
+    if (this.isHandlingFirstRun) {
+      console.log('First run handling already in progress');
+      return;
+    }
+    
+    this.isHandlingFirstRun = true;
+    
     try {
-      console.log('First run continue clicked');
+      // Update button state
+      if (this.elements.firstRunContinue) {
+        this.elements.firstRunContinue.disabled = true;
+        this.elements.firstRunContinue.textContent = 'Getting Started...';
+      }
+      
+      console.log('Completing first run in settings...');
       
       // Mark first run as complete
       await settingsService.completeFirstRun();
       console.log('First run marked as complete');
       
       // Hide the onboarding modal
-      this.hideOnboardingModal();
+      this._hideOnboardingModal();
       console.log('Onboarding modal hidden');
       
       // Start authentication flow
+      console.log('Starting authentication flow...');
       await this.handleSignIn();
+      
     } catch (error) {
-      console.error('Error in handleFirstRunContinue:', error);
-      errorTracker.logError('Failed to complete first run', { error });
-      this.showErrorState('Failed to complete setup');
+      console.error('❌ Error in handleFirstRunContinue:', error);
+      errorTracker.captureException(error, { context: 'first_run_continue' });
+      
+      // Show error but keep the modal open so user can retry
+      this.showErrorState('Failed to complete setup. Please try again.');
+      
+      // Re-enable the button
+      if (this.elements.firstRunContinue) {
+        this.elements.firstRunContinue.disabled = false;
+        this.elements.firstRunContinue.textContent = 'Get Started';
+      }
+      
+    } finally {
+      this.isHandlingFirstRun = false;
     }
   }
   
   // PRIVATE METHODS
   
   /**
+   * Check if we should show the first run modal
+   * @returns {Promise<boolean>} - True if first run modal should be shown
+   * @private
+   */
+  async _shouldShowFirstRun() {
+    try {
+      const settings = await settingsService.loadSettings();
+      return settings?.firstRun !== false; // Default to true if not set
+    } catch (error) {
+      console.error('Error checking first run status:', error);
+      return true; // Default to showing first run on error
+    }
+  }
+
+  /**
    * Cache DOM elements
    * @returns {boolean} - Always returns true to ensure initialization can continue
    * @private
    */
   _cacheElements() {
-    this.elements = {};
+    // Only initialize elements if it doesn't exist
+    if (!this.elements) {
+      this.elements = {};
+    }
     
     // Helper function to safely get elements
     const getElement = (id) => {
@@ -867,6 +1332,7 @@ class UIController {
     this.elements.firstRunModal = getElement('first-run-modal');
     this.elements.firstRunContinue = getElement('first-run-continue');
     this.elements.versionSpan = getElement('version');
+    this.elements.triggerThreshold = getElement('trigger-threshold');
     
     // Always return true to ensure initialization can continue
     // even if some non-critical elements are missing
@@ -1068,15 +1534,27 @@ class UIController {
    */
   async _displayUserEmail() {
     try {
-      if (this.elements.userEmailSpan) {
-        // Get user info with silent error handling during initialization
-        const userInfo = await authService.getUserInfo(true);
-        
-        // Display email
-        this.elements.userEmailSpan.textContent = userInfo.email || 'user@example.com';
+      const userInfo = await authService.getUserInfo();
+      if (userInfo && userInfo.email) {
+        if (this.elements.userEmailSpan) {
+          this.elements.userEmailSpan.textContent = userInfo.email;
+          this.elements.userEmailSpan.title = userInfo.email; // Add tooltip with full email
+          console.log('User email displayed:', userInfo.email);
+        } else {
+          console.warn('User email element not found in DOM');
+        }
+      } else {
+        console.warn('No user info available to display');
+        // Fallback to a default or placeholder if needed
+        if (this.elements.userEmailSpan) {
+          this.elements.userEmailSpan.textContent = 'user@example.com';
+        }
       }
     } catch (error) {
-      console.warn('Failed to display user email:', error.message);
+      console.error('Error displaying user email:', error);
+      errorTracker.logError('Failed to display user email', { error });
+      
+      // Fallback to a default or placeholder
       if (this.elements.userEmailSpan) {
         this.elements.userEmailSpan.textContent = 'user@example.com';
       }
