@@ -492,6 +492,47 @@ class UIController {
   /**
    * Clear any polling error messages
    */
+  /**
+   * Show polling error in the UI
+   * @param {string|Object} error - Error message or error object
+   */
+  showPollingError(error) {
+    try {
+      console.error('Showing polling error:', error);
+      
+      // Ensure we have the polling error element
+      if (!this.elements.pollingError) {
+        console.warn('Polling error element not found in DOM');
+        return;
+      }
+      
+      // Extract error message if error is an object
+      let errorMessage = typeof error === 'object' ? error.message || String(error) : String(error);
+      
+      // Special handling for specific error types
+      if (errorMessage.includes('refresh_cooldown')) {
+        errorMessage = 'Please wait before refreshing again';
+      } else if (errorMessage.includes('auth') || errorMessage.includes('token')) {
+        errorMessage = 'Authentication error. Please sign in again.';
+      } else if (errorMessage.includes('network')) {
+        errorMessage = 'Network error. Please check your connection.';
+      }
+      
+      // Update error message and show the element
+      this.elements.pollingError.textContent = errorMessage;
+      this.elements.pollingError.classList.remove('hidden');
+      
+      // Auto-hide the error after 10 seconds
+      setTimeout(() => this.clearPollingError(), 10000);
+      
+    } catch (err) {
+      console.error('Error showing polling error:', err);
+    }
+  }
+  
+  /**
+   * Clear any polling error messages
+   */
   clearPollingError() {
     try {
       if (this.elements.pollingError) {
