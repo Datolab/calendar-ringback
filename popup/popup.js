@@ -27,26 +27,91 @@ document.addEventListener('DOMContentLoaded', async () => {
   try {
     console.log('Calendar Callback: Popup initialized');
     
-    // Error tracking initializes automatically in the constructor
-    // No need to call initialize() as it doesn't exist
+    // Set up message listener for background script communications first
+    setupMessageListener();
     
     // Initialize the UI controller
     await uiController.init();
     
-    // Set up message listener for background script communications
-    setupMessageListener();
-    
     // Establish connection with background script
     connectToBackground();
     
-    // Request immediate status update from background
+    // First check local auth state for immediate UI update
+    const isAuthenticated = await checkLocalAuthState();
+    
+    // Then request fresh status from background
     requestStatusUpdate();
+    
+    // Set up periodic status updates
+    setupPeriodicStatusUpdates();
     
   } catch (error) {
     errorTracker.logError('Error initializing popup', { error });
     console.error('Failed to initialize popup:', error);
+    
+    // Show error state in UI
+    uiController.showErrorState('Failed to initialize: ' + (error.message || 'Unknown error'));
   }
 });
+
+/**
+ * Check local authentication state for immediate UI update
+ */
+async function checkLocalAuthState() {
+  try {
+    // Try to load from sync storage first (persists across devices)
+    let data = {};
+    try {
+      data = await chrome.storage.sync.get('auth_state');
+      if (!data.auth_state) {
+        data = await chrome.storage.local.get('auth_state');
+      }
+    } catch (error) {
+      console.warn('Error checking local auth state:', error);
+      return false;
+    }
+    
+    if (data.auth_state) {
+      const now = Date.now();
+      const tokenExpiry = data.auth_state.tokenExpiry || 0;
+      const tokenRefreshExpiry = data.auth_state.tokenRefreshExpiry || 0;
+      const isValid = data.auth_state.token && 
+                     (tokenExpiry > now || tokenRefreshExpiry > now);
+      
+      if (isValid) {
+        // Update UI with cached data
+        // Pass the userInfo directly to showSignedInUI which will handle the update
+        await uiController.showSignedInUI(data.auth_state.userInfo || {});
+        return true;
+      }
+    }
+    
+    return false;
+  } catch (error) {
+    console.warn('Error in checkLocalAuthState:', error);
+    return false;
+  }
+}
+
+/**
+ * Set up periodic status updates while popup is open
+ */
+function setupPeriodicStatusUpdates() {
+  // Request status update every 5 seconds while popup is open
+  const statusInterval = setInterval(() => {
+    if (document.visibilityState === 'visible') {
+      requestStatusUpdate();
+    } else {
+      // Clear interval when popup is closed
+      clearInterval(statusInterval);
+    }
+  }, 5000);
+  
+  // Clean up on page unload
+  window.addEventListener('unload', () => {
+    clearInterval(statusInterval);
+  });
+}
 
 /**
  * Connect to the background script using runtime.connect
@@ -78,33 +143,94 @@ function connectToBackground() {
 }
 
 /**
- * Request a status update from the background script
+ * Request a status update from the background script with retry logic
  */
-async function requestStatusUpdate() {
+function requestStatusUpdate(attempt = 0) {
+  const MAX_ATTEMPTS = 2;
+  const RETRY_DELAY = 500; // ms
+  
   try {
-    chrome.runtime.sendMessage(
-      { action: 'getStatusUpdate' },
-      (response) => {
-        if (chrome.runtime.lastError) {
-          // This is expected when background isn't ready yet
-          console.debug('Status update not available yet:', chrome.runtime.lastError.message);
-          
-          // Schedule a retry after a short delay
-          setTimeout(requestStatusUpdate, 1000);
+    // First check if we have a valid connection
+    if (!backgroundPort) {
+      connectToBackground();
+    }
+    
+    // Try to send message through port first (lower latency)
+    if (backgroundPort) {
+      try {
+        backgroundPort.postMessage({ action: 'getStatusUpdate' });
+        return; // Successfully sent through port
+      } catch (portError) {
+        console.warn('Port message failed, falling back to runtime message:', portError);
+        backgroundPort = null; // Reset port connection for next attempt
+      }
+    }
+    
+    // Fall back to runtime message if port fails or doesn't exist
+    chrome.runtime.sendMessage({ action: 'getStatusUpdate' }, (response) => {
+      // Handle Chrome's special "receiving end does not exist" error
+      if (chrome.runtime.lastError) {
+        if (chrome.runtime.lastError.message && 
+            chrome.runtime.lastError.message.includes('receiving end does not exist')) {
+          // This is normal when the service worker is starting up
+          if (attempt < MAX_ATTEMPTS) {
+            console.log(`Service worker not ready, retrying (${attempt + 1}/${MAX_ATTEMPTS})...`);
+            setTimeout(() => requestStatusUpdate(attempt + 1), RETRY_DELAY * (attempt + 1));
+            
+            // Show loading state in UI
+            uiController.updateServiceStatus({
+              state: 'starting',
+              message: 'Starting monitoring service...'
+            });
+            return;
+          }
+        }
+        
+        console.error('Error getting status update:', chrome.runtime.lastError);
+        // Show error in UI
+        uiController.updateServiceStatus({
+          state: 'inactive',
+          message: 'Cannot connect to service worker. Please refresh the page.'
+        });
+        return;
+      }
+      
+      if (response && response.success) {
+        handleStatusUpdate(response);
+      } else {
+        console.error('Failed to get status update:', response && response.error);
+        
+        // If we have no response but no error, the service worker might be starting
+        if (!response && attempt < MAX_ATTEMPTS) {
+          console.log(`No response, retrying (${attempt + 1}/${MAX_ATTEMPTS})...`);
+          setTimeout(() => requestStatusUpdate(attempt + 1), RETRY_DELAY * (attempt + 1));
           return;
         }
         
-        if (response && response.success && response.data) {
-          // Process the status update
-          handleStatusUpdate(response.data);
-        } else if (response && !response.success) {
-          console.warn('Error in status update response:', response.error || 'Unknown error');
-        }
+        // Show error in UI
+        uiController.updateServiceStatus({
+          state: 'inactive',
+          message: response && response.error 
+            ? `Error: ${response.error}` 
+            : 'Failed to get status update. Please try again.'
+        });
       }
-    );
+    });
   } catch (error) {
     console.error('Error requesting status update:', error);
     errorTracker.logError('Failed to request status update', { error });
+    
+    // Show error in UI
+    uiController.updateServiceStatus({
+      state: 'inactive',
+      message: `Error: ${error.message || 'Unknown error'}`
+    });
+    
+    // Retry if possible
+    if (attempt < MAX_ATTEMPTS) {
+      console.log(`Error occurred, retrying (${attempt + 1}/${MAX_ATTEMPTS})...`);
+      setTimeout(() => requestStatusUpdate(attempt + 1), RETRY_DELAY * (attempt + 1));
+    }
   }
 }
 
@@ -220,13 +346,14 @@ function handleStatusUpdate(statusData) {
   try {
     console.log('Processing status update:', statusData);
     
-    // Update authentication status
+    // Update authentication status - pass the full status object with user info
     if (statusData.authenticated !== undefined) {
-      if (statusData.authenticated) {
-        uiController.updateAuthStatus(true);
-      } else {
-        uiController.updateAuthStatus(false);
-      }
+      uiController.updateAuthStatus({
+        isAuthenticated: statusData.authenticated,
+        userInfo: statusData.userInfo || null,
+        userEmail: statusData.userEmail || (statusData.userInfo && statusData.userInfo.email) || null,
+        error: statusData.lastError || null
+      });
     }
     
     // Update polling status
@@ -256,8 +383,20 @@ function handleStatusUpdate(statusData) {
       uiController.updateTriggerThreshold(statusData.triggerThreshold);
     }
     
-    // Show active status in UI
-    uiController.updateServiceStatus(statusData.isPolling ? 'polling' : 'idle');
+    // Update service status with monitoring state
+    if (statusData.monitoringState) {
+      // Use the new monitoring state if available
+      uiController.updateServiceStatus({
+        state: statusData.monitoringState,
+        message: statusData.lastError ? `Error: ${statusData.lastError}` : undefined
+      });
+    } else {
+      // Fallback to legacy isPolling flag
+      uiController.updateServiceStatus({
+        state: statusData.isPolling ? 'active' : 'inactive',
+        message: statusData.lastError ? `Error: ${statusData.lastError}` : undefined
+      });
+    }
   } catch (error) {
     console.error('Error handling status update:', error);
     errorTracker.logError('Failed to handle status update', { error });

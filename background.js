@@ -47,17 +47,22 @@ const CALENDAR_POLLING_INTERVAL = 5; // Minutes between calendar polls
 const EVENT_TRIGGER_THRESHOLD = 5; // Minutes before event to trigger alarm
 const MAX_PAGES = 3; // Maximum number of calendar API result pages to process
 const MAX_EVENTS_TO_LOG = 5; // Maximum number of events to log details for
+const POPUP_STATUS_INTERVAL = 2; // Seconds between status updates to popup
 const DEBUG = true; // Enable debug logging (can be toggled in settings)
-const POPUP_STATUS_INTERVAL = 60; // Seconds between status updates to popup when open
 
-// State
-let isAuthenticated = false;
-let upcomingMeetings = [];
-let lastPollTime = null;
-let lastError = null;
+// Global variables
+let popupUpdateInterval = null; // Interval for sending status updates to popup
+
+// State variables
 let isPolling = false;
-let popupUpdateInterval = null;
-let popupPort = null; // Connection port to popup
+let lastPollTime = null;
+let upcomingMeetings = [];
+let lastError = null;
+let monitoringState = 'inactive'; // 'inactive' | 'starting' | 'active'
+let isAuthenticated = false; // Track authentication state
+let popupPort = null; // For direct port communication with popup
+const MONITORING_STORAGE_KEY = 'monitoringState';
+const KEEP_ALIVE_INTERVAL = 25000; // 25 seconds (less than 30s Chrome service worker timeout)
 
 // Maintain a single instance of auth state for the entire extension
 let authState = {
@@ -67,85 +72,388 @@ let authState = {
   tokenExpiry: null
 };
 
+// Track the current token refresh promise to prevent duplicate refreshes
+let currentTokenRefresh = null;
+
+/**
+ * Safely refresh the authentication token
+ * @param {boolean} interactive - Whether to show the auth UI if needed
+ * @returns {Promise<{token: string, userInfo: object}>}
+ */
+async function refreshTokenSafely(interactive = false) {
+  // If we're already refreshing, return the existing promise
+  if (currentTokenRefresh) {
+    console.log('[Background] Token refresh already in progress, returning existing promise');
+    return currentTokenRefresh;
+  }
+
+  try {
+    console.log(`[Background] Starting safe token refresh (interactive: ${interactive})`);
+    
+    // Create a promise that will resolve when the refresh is complete
+    currentTokenRefresh = (async () => {
+      try {
+        // Refresh the token using the auth service
+        const result = await authService.refreshToken(interactive);
+        
+        if (result && result.token) {
+          // Update our local state with the new token
+          await updateAuthState({
+            token: result.token,
+            tokenExpiry: result.expiry,
+            userInfo: result.userInfo || authState.userInfo,
+            isAuthenticated: true
+          });
+          
+          return {
+            token: result.token,
+            userInfo: result.userInfo || authState.userInfo
+          };
+        } else {
+          throw new Error('No token received from refresh');
+        }
+      } finally {
+        // Always clear the current refresh when done
+        currentTokenRefresh = null;
+      }
+    })();
+
+    return await currentTokenRefresh;
+  } catch (error) {
+    console.error('[Background] Error in safe token refresh:', error);
+    
+    // If the error is an auth error, clear the auth state
+    if (error.message.includes('auth') || error.message.includes('token')) {
+      console.log('[Background] Auth error, clearing auth state');
+      await updateAuthState({
+        token: null,
+        tokenExpiry: null,
+        userInfo: null,
+        isAuthenticated: false
+      });
+    }
+    
+    throw error;
+  }
+}
+
 // Update the auth state and notify all connected ports
 async function updateAuthState(newState) {
-  authState = { ...authState, ...newState };
-  isAuthenticated = !!authState.token && authState.tokenExpiry > Date.now();
+  console.log('[Background] Updating auth state:', {
+    ...newState,
+    token: newState.token ? '[REDACTED]' : null,
+    hasToken: !!newState.token,
+    tokenExpiry: newState.tokenExpiry ? new Date(newState.tokenExpiry).toISOString() : null
+  });
+  
+  // Merge new state
+  const updatedState = { 
+    ...authState, 
+    ...newState,
+    isAuthenticated: !!(newState.token && 
+      (!newState.tokenExpiry || new Date(newState.tokenExpiry) > new Date(Date.now() + 60000))) // Add 1 minute buffer
+  };
+  
+  // Update the global isAuthenticated variable
+  isAuthenticated = updatedState.isAuthenticated;
+  
+  // Only update if something actually changed
+  const stateChanged = 
+    authState.token !== updatedState.token ||
+    authState.tokenExpiry !== updatedState.tokenExpiry ||
+    authState.isAuthenticated !== updatedState.isAuthenticated;
+  
+  if (!stateChanged) {
+    console.log('[Background] Auth state unchanged, skipping update');
+    return;
+  }
+  
+  authState = updatedState;
+  isAuthenticated = authState.isAuthenticated;
   
   // Save to storage for persistence
-  await chrome.storage.local.set({ 
-    auth_state: {
-      token: authState.token,
-      tokenExpiry: authState.tokenExpiry,
-      userInfo: authState.userInfo
+  const stateToSave = {
+    token: authState.token,
+    tokenExpiry: authState.tokenExpiry,
+    userInfo: authState.userInfo
+  };
+  
+  try {
+    // Save to local storage
+    await chrome.storage.local.set({ 
+      auth_state: stateToSave,
+      lastAuthUpdate: Date.now()
+    });
+    
+    // Also save to sync storage if available
+    if (chrome.storage.sync) {
+      try {
+        await chrome.storage.sync.set({ 
+          auth_state: stateToSave,
+          lastAuthUpdate: Date.now()
+        });
+        console.log('[Background] Auth state saved to sync storage');
+      } catch (syncError) {
+        console.warn('[Background] Could not save to sync storage:', syncError);
+      }
     }
-  });
+    
+    console.log('[Background] Auth state saved to storage');
+    
+    // Notify all connected ports about the auth state change
+    sendStatusUpdateToPopup();
+    
+  } catch (error) {
+    console.error('[Background] Error saving auth state:', error);
+    errorTracker.captureException(error, { 
+      context: 'save_auth_state',
+      hasToken: !!authState.token,
+      hasUserInfo: !!authState.userInfo
+    });
+  }
   
   // Notify all connected ports
   sendStatusUpdateToPopup();
+  
+  // If we just signed out, clear any sensitive data
+  if (newState.token === null) {
+    console.log('[Background] Auth state cleared, resetting sensitive data');
+    upcomingMeetings = [];
+    lastPollTime = null;
+  }
+  
   return authState;
 }
 
 // Initialize auth state from storage
 async function initializeAuthState() {
   try {
-    const data = await chrome.storage.local.get('auth_state');
+    // Try to load from sync storage first (persists across devices)
+    let data = {};
+    try {
+      if (chrome.storage.sync) {
+        data = await chrome.storage.sync.get('auth_state');
+        console.log('[Background] Loaded auth state from sync storage:', data.auth_state ? 'found' : 'not found');
+      }
+    } catch (syncError) {
+      console.warn('[Background] Could not load from sync storage:', syncError);
+    }
+    
+    // If nothing in sync storage, try local storage
+    if (!data.auth_state) {
+      data = await chrome.storage.local.get('auth_state');
+      console.log('[Background] Loaded auth state from local storage:', data.auth_state ? 'found' : 'not found');
+    }
+    
     if (data.auth_state) {
+      const isValid = data.auth_state.token && 
+                     data.auth_state.tokenExpiry > Date.now();
+      
       authState = {
         token: data.auth_state.token || null,
         tokenExpiry: data.auth_state.tokenExpiry || null,
         userInfo: data.auth_state.userInfo || null,
-        isAuthenticated: !!(data.auth_state.token && 
-          data.auth_state.tokenExpiry > Date.now())
+        isAuthenticated: isValid
       };
+      
       isAuthenticated = authState.isAuthenticated;
+      
+      // If token is invalid, clear it
+      if (!isValid && data.auth_state.token) {
+        console.log('[Background] Token expired, clearing auth state');
+        await Promise.all([
+          chrome.storage.local.remove('auth_state'),
+          chrome.storage.sync?.remove('auth_state')
+        ]);
+        authState = { isAuthenticated: false, token: null, tokenExpiry: null, userInfo: null };
+        isAuthenticated = false;
+      } else if (isValid) {
+        // If we have a valid token, ensure auth service is in sync
+        try {
+          console.log('[Background] Syncing auth service with stored state');
+          await authService.login(false); // Non-interactive login
+        } catch (error) {
+          console.warn('[Background] Failed to sync auth service:', error);
+        }
+      }
+    } else {
+      console.log('[Background] No auth state found in any storage');
+      authState = { isAuthenticated: false, token: null, tokenExpiry: null, userInfo: null };
+      isAuthenticated = false;
     }
-    console.log('[Background] Initialized auth state:', authState);
+    
+    console.log('[Background] Initialized auth state:', {
+      isAuthenticated,
+      hasToken: !!authState.token,
+      tokenExpiry: authState.tokenExpiry ? new Date(authState.tokenExpiry).toISOString() : null
+    });
+    
     return authState;
   } catch (error) {
     console.error('Error initializing auth state:', error);
     errorTracker.captureException(error, { context: 'initialize_auth_state' });
-    return authState;
+    return { isAuthenticated: false, token: null, tokenExpiry: null, userInfo: null };
+  }
+}
+
+// Set up port connection from popup
+function setupPortConnection(port) {
+  if (port.name === 'popup') {
+    // Store the port for later use
+    popupPort = port;
+    
+    // Set up message handler
+    port.onMessage.addListener(handlePopupMessage);
+    
+    // Handle port disconnection
+    port.onDisconnect.addListener(() => {
+      console.log('Popup disconnected');
+      if (popupPort === port) {
+        popupPort = null;
+      }
+    });
+    
+    console.log('Connected to popup');
   }
 }
 
 // Initialize the extension
 async function initialize() {
-  console.log('Calendar Callback Extension: Initializing background service worker');
-  
   try {
-    // Initialize error tracking first
-    errorTracker.init();
+    console.log('Initializing extension...');
     
-    // Initialize auth state before anything else
+    // Set up port connection listener
+    chrome.runtime.onConnect.addListener(setupPortConnection);
+    
+    // Initialize auth state
     await initializeAuthState();
     
-    // Check for authentication status
-    await checkAuthStatus();
+    // Restore monitoring state from storage
+    const storedState = await chrome.storage.local.get(MONITORING_STORAGE_KEY);
+    if (storedState[MONITORING_STORAGE_KEY]) {
+      monitoringState = storedState[MONITORING_STORAGE_KEY].state || 'inactive';
+      lastPollTime = storedState[MONITORING_STORAGE_KEY].lastPollTime 
+        ? new Date(storedState[MONITORING_STORAGE_KEY].lastPollTime) 
+        : null;
+    }
     
-    // Set up the alarm for polling calendar
+    // Set up the polling alarm
     await setupPollingAlarm();
     
-    console.log('Calendar Callback Extension: Initialization complete');
+    // Set up keep-alive mechanism
+    setupKeepAlive();
+    
+    // Initial poll if authenticated
+    const authState = await initializeAuthState();
+    if (authState.isAuthenticated) {
+      await pollCalendar();
+    } else {
+      // Still send status update to update UI
+      sendStatusUpdateToPopup();
+    }
+    
+    console.log('Extension initialized with monitoring state:', monitoringState);
   } catch (error) {
-    console.error('Error during initialization:', error);
-    errorTracker.captureException(error, { context: 'background_initialize' });
-    throw error;
+    console.error('Failed to initialize extension:', error);
+    logError(error, 'initialization');
   }
+}
+
+// Set up keep-alive mechanism to prevent service worker from going inactive
+function setupKeepAlive() {
+  // Keep the service worker alive with periodic checks
+  const keepAlive = () => {
+    if (monitoringState === 'active') {
+      // Just update the timestamp to show we're still alive
+      updateMonitoringState(monitoringState);
+    }
+  };
+  
+  // Run more frequently than the service worker timeout (30s)
+  setInterval(keepAlive, KEEP_ALIVE_INTERVAL);
+  
+  // Also keep alive on visibility changes
+  chrome.runtime.onStartup.addListener(keepAlive);
+  chrome.windows.onFocusChanged.addListener(keepAlive);
+  chrome.tabs.onActivated.addListener(keepAlive);
+  chrome.tabs.onUpdated.addListener(keepAlive);
+}
+
+// Update monitoring state and persist it
+async function updateMonitoringState(newState, additionalData = {}) {
+  if (newState !== monitoringState || additionalData.forceUpdate) {
+    monitoringState = newState;
+    
+    // Persist the state
+    await chrome.storage.local.set({
+      [MONITORING_STORAGE_KEY]: {
+        state: monitoringState,
+        lastUpdated: new Date().toISOString(),
+        lastPollTime: lastPollTime ? lastPollTime.toISOString() : null,
+        ...additionalData
+      }
+    });
+    
+    console.log(`Monitoring state updated to: ${monitoringState}`);
+  }
+  
+  // Always send status update when state changes
+  sendStatusUpdateToPopup();
 }
 
 // Check OAuth authentication status
 async function checkAuthStatus(interactive = false) {
   try {
-    console.log(`Checking auth status (interactive: ${interactive})`);
+    console.log(`[Background] Checking auth status (interactive: ${interactive})`);
     
     // First check our local auth state
     const currentState = await initializeAuthState();
     
-    // If we have a valid token, we're authenticated
-    if (currentState.token && currentState.tokenExpiry > Date.now()) {
+    // Check if we have a valid token that's not about to expire soon (within 5 minutes)
+    const tokenExpiresSoon = currentState.tokenExpiry && 
+                           (currentState.tokenExpiry - Date.now()) < 300000; // 5 minutes
+    
+    // If we have a valid token that's not expiring soon, we're good
+    if (currentState.token && !tokenExpiresSoon) {
+      console.log('[Background] Using existing valid token');
       isAuthenticated = true;
-      return isAuthenticated;
+      return true;
+    }
+    
+    // If we have a token but it's expiring soon, try to refresh it
+    if (currentState.token && tokenExpiresSoon) {
+      console.log('[Background] Token expiring soon, attempting to refresh...');
+      try {
+        const { token, userInfo } = await refreshTokenSafely(interactive);
+        if (token) {
+          console.log('[Background] Token refreshed successfully');
+          isAuthenticated = true;
+          return true;
+        }
+      } catch (error) {
+        console.error('[Background] Error refreshing token:', error);
+        // Continue to interactive auth if refresh fails
+      }
+    }
+    
+    // If we get here, we need to authenticate
+    console.log('[Background] No valid token found, authentication required');
+    isAuthenticated = false;
+    
+    // If interactive is true, try to authenticate now
+    if (interactive) {
+      console.log('[Background] Starting interactive authentication...');
+      try {
+        const { token, userInfo } = await refreshTokenSafely(true);
+        if (token) {
+          console.log('[Background] Interactive authentication successful');
+          isAuthenticated = true;
+          return true;
+        }
+      } catch (error) {
+        console.error('[Background] Interactive authentication failed:', error);
+        // Continue to return false
+      }
     }
     
     // If not authenticated and interactive mode is allowed, try interactive auth
@@ -153,7 +461,7 @@ async function checkAuthStatus(interactive = false) {
       console.log('Not authenticated, trying interactive authentication...');
       try {
         // Use authService for the actual authentication flow
-        await authService.signIn();
+        await authService.login(interactive);
         
         // Update our local auth state with the new token
         const token = await authService.getToken();
@@ -228,33 +536,83 @@ async function checkAuthStatus(interactive = false) {
  * @param {object} message - The message to send
  * @param {boolean} forceSend - Whether to force sending even if not connected
  */
+/**
+ * Handle messages from the popup through port connection
+ * @param {Object} message - Message from popup
+ * @param {MessagePort} port - The port the message was received on (optional)
+ */
+function handlePopupMessage(message, port) {
+  try {
+    console.log('Background received message from popup:', message);
+    
+    // Handle the message based on action
+    switch (message.action) {
+      case 'getStatusUpdate':
+        sendStatusUpdateToPopup();
+        break;
+        
+      case 'refreshMeetings':
+        pollCalendar();
+        break;
+        
+      case 'checkAuth':
+        checkAuthStatus();
+        break;
+        
+      case 'signIn':
+        signIn();
+        break;
+        
+      case 'signOut':
+        signOut();
+        break;
+        
+      default:
+        console.log('Unknown message action:', message.action);
+    }
+  } catch (error) {
+    console.error('Error handling popup message:', error);
+    logError(error, 'popup_message_handler');
+  }
+}
+
+/**
+ * Send a message to the popup if it's connected
+ * @param {Object} message - The message to send
+ * @param {boolean} forceSend - Whether to try alternative methods if port is not available
+ * @returns {boolean} Whether the message was sent successfully
+ */
 function sendMessageToPopup(message, forceSend = false) {
   try {
-    // If we have an active port connection to the popup, use that
+    let messageSent = false;
+    
+    // Try using the port connection first if available
     if (popupPort) {
       try {
         popupPort.postMessage(message);
-        return true;
+        messageSent = true;
       } catch (portError) {
-        // Handle case where port might appear valid but is disconnected
-        console.log('Port appears disconnected, clearing reference:', portError.message);
+        console.log('Port connection error, clearing reference:', portError.message);
         popupPort = null;
-        // Continue to runtime messaging fallback if forceSend is true
       }
     }
     
-    // Otherwise fall back to runtime messaging
-    if (forceSend) {
-      chrome.runtime.sendMessage(message, response => {
-        // Handle runtime.lastError to prevent unchecked error logs
-        if (chrome.runtime.lastError) {
-          // Just log at debug level since this is expected when popup is closed
-          console.debug('Message not delivered (popup likely closed):', chrome.runtime.lastError.message);
-        }
-      });
+    // If port message failed and forceSend is true, try runtime messaging
+    if (!messageSent && forceSend) {
+      try {
+        chrome.runtime.sendMessage(message, response => {
+          if (chrome.runtime.lastError) {
+            console.debug('Runtime message not delivered (popup likely closed):', 
+                        chrome.runtime.lastError.message);
+          }
+        });
+        messageSent = true;
+      } catch (runtimeError) {
+        console.error('Runtime message failed:', runtimeError);
+      }
     }
     
-    return false;
+    return messageSent;
   } catch (error) {
     console.error('Failed to send message to popup:', error);
     logError(error, 'popup_messaging');
@@ -291,8 +649,10 @@ async function sendStatusUpdateToPopup() {
         lastError: lastError,
         upcomingMeetings: upcomingMeetings,
         isPolling: isPolling,
+        monitoringState: monitoringState, // Add monitoring state
         pollInterval: CALENDAR_POLLING_INTERVAL,
-        triggerThreshold: EVENT_TRIGGER_THRESHOLD
+        triggerThreshold: EVENT_TRIGGER_THRESHOLD,
+        timestamp: new Date().toISOString()
       }
     };
     
@@ -317,95 +677,122 @@ async function handleAlarm(alarm) {
   }
 }
 
+// Helper function to determine if an error is retryable
+function isRetryableError(statusCode) {
+  // 5xx errors are server errors and can be retried
+  // 429 is too many requests (rate limiting)
+  // 408 is request timeout
+  return statusCode >= 500 || statusCode === 429 || statusCode === 408;
+}
+
+// Helper function to fetch with retry logic
+async function fetchWithRetry(url, token, maxRetries = 2) {
+  let lastError;
+  
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    try {
+      const response = await fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Content-Type': 'application/json'
+        }
+      });
+      
+      // If successful, return the response
+      if (response.ok) {
+        return response;
+      }
+      
+      // If we get a 401, we need to refresh the token
+      if (response.status === 401) {
+        throw new Error('token_expired');
+      }
+      
+      // For other errors, check if we should retry
+      if (!isRetryableError(response.status) || attempt === maxRetries) {
+        const errorText = await response.text();
+        throw new Error(`API request failed: ${response.status} - ${errorText}`);
+      }
+      
+      console.log(`Attempt ${attempt + 1} failed, retrying...`);
+      await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1))); // Exponential backoff
+      
+    } catch (error) {
+      lastError = error;
+      if (error.message === 'token_expired' || attempt === maxRetries) {
+        throw error;
+      }
+      await new Promise(resolve => setTimeout(resolve, 1000 * (attempt + 1)));
+    }
+  }
+  
+  throw lastError || new Error('Unknown error in fetchWithRetry');
+}
+
 // Fetch upcoming calendar events with pagination support
 async function fetchUpcomingEvents() {
+  let allEvents = [];
+  let nextPageToken = null;
+  let pageCount = 0;
+  const MAX_PAGES = 5; // Safety limit to prevent infinite loops
+  let token;
+  
   try {
-    // Get token from AuthService
-    const token = authService.getToken();
-    if (!token) {
-      console.log('No auth token available, skipping calendar fetch');
-      return;
+    // Get a fresh token
+    const authResult = await refreshTokenSafely();
+    if (!authResult || !authResult.token) {
+      throw new Error('No authentication token available');
     }
+    token = authResult.token;
     
-    // Calculate time range for API query
+    // Calculate time range for API query (next 24 hours)
     const now = new Date();
     const timeMin = now.toISOString();
-    
     const future = new Date(now);
-    future.setMinutes(now.getMinutes() + 10);
+    future.setDate(now.getDate() + 1); // Look ahead 24 hours
     const timeMax = future.toISOString();
     
     console.log(`Fetching calendar events from ${timeMin} to ${timeMax}`);
     
-    // Initialize storage for all events
-    let allEvents = [];
-    let nextPageToken = null;
-    let pageCount = 0;
-    const MAX_PAGES = 5; // Safety limit to prevent infinite loops
-    
     // Process pages until we have all events or hit the max page limit
     do {
       // Build URL with pagination token if we have one
-      let url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?timeMin=${timeMin}&timeMax=${timeMax}&singleEvents=true&orderBy=startTime`;
+      let url = `https://www.googleapis.com/calendar/v3/calendars/primary/events?` +
+                `timeMin=${encodeURIComponent(timeMin)}&timeMax=${encodeURIComponent(timeMax)}` +
+                `&singleEvents=true&orderBy=startTime&maxResults=100`;
       
       if (nextPageToken) {
-        url += `&pageToken=${nextPageToken}`;
+        url += `&pageToken=${encodeURIComponent(nextPageToken)}`;
         console.log(`Fetching additional page ${pageCount + 1} of calendar events`);
       }
       
-      // Make API call to Google Calendar
-      const response = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${token}`
-        }
-      });
-      
-      if (!response.ok) {
-        // Handle 401 unauthorized (expired token)
-        if (response.status === 401) {
-          console.log('Token expired (401), attempting to refresh...');
-          // Use AuthService to refresh the token
-          try {
-            const newToken = await authService.refreshToken();
-            if (!newToken) {
-              throw new Error('Failed to refresh token');
-            }
-            
-            // Update the token in the headers and retry the request
-            console.log('Retrying with new token...');
-            const retryResponse = await fetch(url, {
-              headers: {
-                'Authorization': `Bearer ${newToken}`
-              }
-            });
-            
-            if (!retryResponse.ok) {
-              throw new Error(`Calendar API error after token refresh: ${retryResponse.status} - ${await retryResponse.text()}`);
-            }
-            
-            // Use the successful response
-            return retryResponse.json();
-          } catch (refreshError) {
-            console.error('Failed to refresh token:', refreshError);
-            await authService.signOut(); // Clear invalid auth state
-            throw new Error('Session expired. Please sign in again.');
-          }
+      try {
+        // Make API call with retry logic
+        const response = await fetchWithRetry(url, token);
+        const data = await response.json();
+        
+        pageCount++;
+        
+        // Process the current page of results
+        if (data.items && data.items.length > 0) {
+          allEvents = allEvents.concat(data.items);
+          console.log(`Added ${data.items.length} events from page ${pageCount}, total: ${allEvents.length}`);
         }
         
-        throw new Error(`Calendar API error: ${response.status} - ${await response.text()}`);
+        // Get the next page token if available
+        nextPageToken = data.nextPageToken || null;
+        
+      } catch (error) {
+        console.error('Error fetching calendar events page:', error);
+        
+        // If we've already retried multiple times, give up
+        if (pageCount >= MAX_PAGES) {
+          throw new Error(`Failed to fetch calendar events after ${pageCount} attempts: ${error.message}`);
+        }
+        
+        // Wait before retrying
+        await new Promise(resolve => setTimeout(resolve, 2000));
       }
-      
-      const data = await response.json();
-      pageCount++;
-      
-      // Process the current page of results
-      if (data.items && data.items.length > 0) {
-        allEvents = allEvents.concat(data.items);
-        console.log(`Added ${data.items.length} events from page ${pageCount}, total: ${allEvents.length}`);
-      }
-      
-      // Get the next page token if available
-      nextPageToken = data.nextPageToken || null;
       
     } while (nextPageToken && pageCount < MAX_PAGES);
     
@@ -416,17 +803,14 @@ async function fetchUpcomingEvents() {
     // If we didn't find any events at all
     if (allEvents.length === 0) {
       console.log('No upcoming events found');
-      return;
+      return [];
     }
     
     // Process all the events we found
     console.log(`Successfully fetched ${allEvents.length} calendar events`);
     
-    // Use the events as if they came from a single request
-    const data = { items: allEvents };
-    
     // Filter for events with Google Meet links
-    const eventsWithMeet = data.items.filter(event => {
+    const eventsWithMeet = allEvents.filter(event => {
       try {
         // Check if user has accepted the event
         const selfAttendee = event.attendees?.find(attendee => attendee.self);
@@ -447,7 +831,8 @@ async function fetchUpcomingEvents() {
     });
     
     console.log(`Found ${eventsWithMeet.length} upcoming events with Google Meet links`);
-    processUpcomingEvents(eventsWithMeet);
+    await processUpcomingEvents(eventsWithMeet);
+    return eventsWithMeet;
     
   } catch (error) {
     console.error('Error fetching calendar events:', error);
@@ -457,7 +842,7 @@ async function fetchUpcomingEvents() {
     if (error.message && error.message.includes('quota')) {
       console.warn('Calendar API quota exceeded. Will retry on next polling cycle.');
       // Store error state for UI feedback
-      chrome.storage.local.set({
+      await chrome.storage.local.set({
         calendarApiState: {
           lastError: 'quota_exceeded',
           timestamp: Date.now(),
@@ -467,16 +852,27 @@ async function fetchUpcomingEvents() {
     } else if (error.message && (error.message.includes('network') || error.message.includes('failed'))) {
       console.warn('Network error when fetching events. Will retry on next polling cycle.');
       // Store error state for UI feedback
-      chrome.storage.local.set({
+      await chrome.storage.local.set({
         calendarApiState: {
           lastError: 'network_error',
           timestamp: Date.now(),
           message: 'Network error. Will retry automatically.'
         }
       });
+    } else if (error.message && (error.message.includes('token') || error.message.includes('auth'))) {
+      console.warn('Authentication error. User may need to sign in again.');
+      await chrome.storage.local.set({
+        calendarApiState: {
+          lastError: 'auth_error',
+          timestamp: Date.now(),
+          message: 'Authentication required. Please sign in again.'
+        }
+      });
+      // Sign out to clear any invalid auth state
+      await authService.signOut();
     } else {
       // Generic error handling
-      chrome.storage.local.set({
+      await chrome.storage.local.set({
         calendarApiState: {
           lastError: 'unknown_error',
           timestamp: Date.now(),
@@ -484,11 +880,18 @@ async function fetchUpcomingEvents() {
         }
       });
     }
+    
+    // Re-throw the error to be handled by the caller
+    throw error;
   } finally {
     // Always update the last fetch timestamp regardless of success/failure
-    chrome.storage.local.set({
-      lastCalendarFetch: Date.now()
-    });
+    try {
+      await chrome.storage.local.set({
+        lastCalendarFetch: Date.now()
+      });
+    } catch (storageError) {
+      console.error('Error updating last fetch time:', storageError);
+    }
   }
 }
 
@@ -751,35 +1154,54 @@ async function setupPollingAlarm() {
  * This is called both by the polling alarm and when manually refreshing from the popup
  */
 async function pollCalendar() {
+  // Skip if already polling
+  if (isPolling) {
+    console.log('Calendar polling already in progress, skipping this request');
+    return;
+  }
+  
+  isPolling = true;
+  
   try {
-    console.log('Polling calendar for updates...');
+    console.log('Starting calendar polling...');
     
-    // Check if we're already polling to prevent duplicate requests
-    if (isPolling) {
-      console.log('Calendar polling already in progress, skipping this request');
-      return;
-    }
+    // Update monitoring state to 'starting'
+    await updateMonitoringState('starting');
     
-    isPolling = true;
+    // Small delay to ensure UI can show the starting state
+    await new Promise(resolve => setTimeout(resolve, 300));
     
     // Fetch upcoming events
     await fetchUpcomingEvents();
     
-    // Update last poll time
+    // Update state and timestamps
     lastPollTime = new Date();
+    lastError = null;
     
-    // Send updated status to popup if open
-    sendStatusUpdateToPopup();
+    // Update monitoring state to 'active' with the new poll time
+    await updateMonitoringState('active', {
+      lastPollTime: lastPollTime.toISOString()
+    });
+    
+    console.log('Calendar polling completed successfully');
     
   } catch (error) {
     console.error('Error polling calendar:', error);
     lastError = error.message;
-    
-    // Send error to popup if open
-    sendStatusUpdateToPopup();
+    await updateMonitoringState('inactive', { error: error.message });
     
   } finally {
-    isPolling = false;
+    try {
+      // Ensure we always have a final state
+      if (monitoringState === 'starting') {
+        await updateMonitoringState('active');
+      }
+      
+      // Send final status update
+      sendStatusUpdateToPopup();
+    } finally {
+      isPolling = false;
+    }
   }
 }
 
@@ -823,38 +1245,8 @@ chrome.runtime.onConnect.addListener(port => {
         popupUpdateInterval = null;
       }
     });
-    
-    // Handle messages from popup
-    port.onMessage.addListener(handlePopupMessage);
   }
 });
-
-/**
- * Handle messages from the popup through port connection
- * @param {Object} message - Message from popup
- */
-function handlePopupMessage(message) {
-  console.log('Background received message from popup:', message);
-  
-  // Handle the message based on action
-  switch (message.action) {
-    case 'refreshMeetings':
-      pollCalendar();
-      break;
-      
-    case 'checkAuth':
-      checkAuthStatus();
-      break;
-      
-    case 'signIn':
-      signIn();
-      break;
-      
-    case 'signOut':
-      signOut();
-      break;
-  }
-}
 
 // Listen for messages from the popup or other parts of the extension
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -988,7 +1380,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       case 'signIn':
         console.log('Received signIn request');
         // Handle sign in through authService
-        authService.signIn()
+        authService.login()
           .then(({ token, userInfo }) => {
             console.log('Sign in successful, updating auth state');
             // Update the auth state with the new token and user info
@@ -1022,6 +1414,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
               token: null
             });
             
+            // Send detailed error response
             respond(false, { 
               error: error.message || 'Authentication failed',
               details: error.toString()
