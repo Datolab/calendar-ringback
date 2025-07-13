@@ -22,6 +22,18 @@ document.addEventListener('DOMContentLoaded', () => {
   // Initialize
   initializeCallOverlay();
   
+  // Check for auto-join setting and handle automatically
+  chrome.storage.local.get('userSettings', (result) => {
+    console.log('Initial settings check in overlay (userSettings):', result);
+    const settings = result.userSettings || {};
+    if (settings.autoJoin) {
+      console.log('Auto-join enabled, automatically answering call...');
+      handleAnswer();
+    } else {
+      console.log('Auto-join not enabled or settings not found. Current settings:', settings);
+    }
+  });
+  
   // Event Listeners
   answerButton.addEventListener('click', handleAnswer);
   declineButton.addEventListener('click', handleDecline);
@@ -103,25 +115,25 @@ document.addEventListener('DOMContentLoaded', () => {
   
   async function playRingtone() {
     try {
-      // Get ringtone setting
-      const { settings } = await chrome.storage.local.get('settings');
-      let soundFile = '../assets/audio/classic-ring.mp3'; // Default to classic-ring if none specified
+      // Get user settings from storage
+      const result = await new Promise(resolve => {
+        chrome.storage.local.get('userSettings', resolve);
+      });
       
-      if (settings && settings.ringtone) {
-        switch (settings.ringtone) {
-          case 'classic':
-            soundFile = '../assets/audio/classic-ring.mp3';
-            break;
-          case 'digital':
-            soundFile = '../assets/audio/digital-ring.mp3';
-            break;
-          case 'old':
-            soundFile = '../assets/audio/old-ring.mp3';
-            break;
-          default:
-            soundFile = '../assets/audio/classic-ring.mp3';
-        }
-      }
+      const settings = result.userSettings || {};
+      console.log('Current ringtone settings from storage (userSettings):', settings);
+      
+      // Map ringtone names to their corresponding audio files
+      const ringtoneMap = {
+        'classic': 'classic-ring.mp3',
+        'digital': 'digital-ring.mp3',
+        'old': 'old-ring.mp3'
+      };
+      
+      // Get the ringtone name with fallback
+      const ringtoneName = (settings.ringtone || 'classic').toLowerCase();
+      const soundFile = `../assets/audio/${ringtoneMap[ringtoneName] || ringtoneMap['classic']}`;
+      console.log('Selected ringtone file:', soundFile, 'for setting:', settings.ringtone);
       
       console.log('Playing ringtone:', soundFile);
       
@@ -173,9 +185,11 @@ document.addEventListener('DOMContentLoaded', () => {
     // Clear auto-dismiss timer
     clearTimeout(autoDismissTimer);
     
-    // Get settings
-    const { settings } = await chrome.storage.local.get('settings');
-    const autoJoin = settings?.autoJoin || false;
+    // Get settings from userSettings key
+    const result = await chrome.storage.local.get('userSettings');
+    const settings = result.userSettings || {};
+    const autoJoin = settings.autoJoin || false;
+    console.log('Auto-join setting in handleAnswer:', { autoJoin, allSettings: settings });
     
     // Mark this meeting as joined
     await markMeetingAsProcessed(meetingData.id, 'joined');
